@@ -1,0 +1,172 @@
+[.github]
+  - copilot-instructions.md
+[.vite]
+  [deps]
+    - _metadata.json
+    - axios.js
+    - axios.js.map
+    - chunk-42LPO3HH.js
+    - chunk-42LPO3HH.js.map
+    - chunk-C7VR2U7R.js
+    - chunk-C7VR2U7R.js.map
+    - chunk-OOCCGKRY.js
+    - chunk-OOCCGKRY.js.map
+    - chunk-PR4QN5HX.js
+    - chunk-PR4QN5HX.js.map
+    - js-yaml.js
+    - js-yaml.js.map
+    - jszip.js
+    - jszip.js.map
+    - lucide-react.js
+    - lucide-react.js.map
+    - package.json
+    - react-dom_client.js
+    - react-dom_client.js.map
+    - react-icons_fa.js
+    - react-icons_fa.js.map
+    - react-icons_fi.js
+    - react-icons_fi.js.map
+    - react-router-dom.js
+    - react-router-dom.js.map
+    - react.js
+    - react.js.map
+    - recharts.js
+    - recharts.js.map
+    - roslib.js
+    - roslib.js.map
+[backend]
+  [__pycache__]
+    - database.cpython-310.pyc
+    - ros2_pose_publisher.cpython-310.pyc
+    - task_status.cpython-310.pyc
+  [instance]
+    - robot_positions.db
+    - users.db
+  [map_databases]
+    - 02--01-2026.db
+    - 02--01-20266.db
+    - 05-01-2026.db
+    - 05-01-20266.db
+    - 06-01-2026.db
+    - 07-01-2026.db
+    - 12-01-2026.db
+    - 13-01-2026.db
+    - 15-01-2026.db
+    - 15-01-202666.db
+    - 15-01-26new.db
+    - 15zone.db
+    - 8-01-2026.db
+    - 9-01-2026.db
+    - agvfloor.db
+    - default.db
+    - direction.db
+    - direction2.db
+    - hiwon.db
+    - mapmap.db
+    - maps.db
+    - mapss.db
+    - now.db
+    - sanketmap.db
+    - sanketmap1.db
+    - triangle.db
+    - yawmap.db
+    - yawmapnew.db
+  [tasks]
+    - saved_tasks.json
+  - amr_tasks.db
+  - app.py
+  - app1.py
+  - bt_generator.js
+  - database.py
+  - extract_bt_nodes.sh
+  - hiwonder-server.js
+  - initialpose.py
+  - magnetic.py
+  - map_nodes.db
+  - my_amcl_bag_0.db3
+  - package-lock.json
+  - package.json
+  - requirements.txt
+  - ros2_pose_flask.py
+  - ros2_pose_publisher.py
+  - rosbridge.launch.py
+  - status.py
+  - task_status.py
+  - topicstatus.py
+  - users.db
+  - users.py
+[build]
+  - .built_by
+  - COLCON_IGNORE
+[docs]
+  - project_structure.txt
+[install]
+  - .colcon_install_layout
+  - COLCON_IGNORE
+  - _local_setup_util_ps1.py
+  - _local_setup_util_sh.py
+  - local_setup.bash
+  - local_setup.ps1
+  - local_setup.sh
+  - local_setup.zsh
+  - setup.bash
+  - setup.ps1
+  - setup.sh
+  - setup.zsh
+[instance]
+  - robot_positions.db
+[log]
+  [build_2025-10-28_09-57-33]
+    - events.log
+    - logger_all.log
+  - COLCON_IGNORE
+[robot]
+  - hiwonder-client.py
+  - hiwonder_driver.py
+  - joystickapp.py
+[src]
+  [assets]
+    - Magnetic2.png
+    - R&DAMR.png
+    - Taikishaimage.jpg
+    - Taikishaimage1.png
+    - arrow.gif
+    - arrow.png
+  [components]
+    - DashboardLayout.jsx
+    - Footer.jsx
+    - Header.jsx
+    - JoystickControl.jsx
+    - ProtectedRoute.jsx
+    - Sidebar.jsx
+  [context]
+    - LanguageContext.jsx
+    - RosContext.jsx
+  [pages]
+    - Animation.jsx
+    - Dashboard.jsx
+    - HealthCheck.jsx
+    - LoginForm.jsx
+    - Magnetictape.jsx
+    - Maps.jsx
+    - Mapview.jsx
+    - Playpause.jsx
+    - Qrcode.jsx
+    - RealTime.jsx
+    - Reports.jsx
+    - Settings.jsx
+    - SignupForm.jsx
+    - TaskAllocation.jsx
+  - App.jsx
+  - index.css
+  - main.jsx
+- .gitignore
+- README.md
+- index.html
+- nav2_params.yaml
+- package-lock.json
+- package.json
+- postcss.config.cjs
+- status.py
+- tailwind.config.cjs
+- vite.config.js

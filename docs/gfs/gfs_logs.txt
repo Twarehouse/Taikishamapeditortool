@@ -1,0 +1,6 @@
+[2026-02-20T10:52:41.538Z] [INFO]: Ignoring: .git
+[2026-02-20T10:52:41.539Z] [INFO]: Ignoring: node_modules
+[2026-02-20T10:52:41.541Z] [INFO]: Ignoring: .git
+[2026-02-20T10:52:41.542Z] [INFO]: Ignoring: node_modules
+[2026-02-20T10:52:41.543Z] [INFO]: Ignoring: gfs
+[2026-02-20T10:52:41.544Z] [INFO]: Folder structure written to: /home/sanket/Downloads/fleet-manager-dashboard-full-copy/docs/project_structure.txt

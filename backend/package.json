@@ -1,0 +1,22 @@
+{
+  "name": "fleet-manager-backend",
+  "version": "1.0.0",
+  "description": "HiWonder Robot Mission Control Backend",
+  "main": "hiwonder-server.js",
+  "scripts": {
+    "start": "node hiwonder-server.js",
+    "dev": "nodemon hiwonder-server.js",
+    "test": "echo \"No tests specified\" && exit 0"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.22.1",
+    "socket.io-client": "^4.8.3",
+    "uuid": "^9.0.0",
+    "ws": "^8.19.0",
+    "xml2js": "^0.6.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}
