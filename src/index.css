@@ -1,7 +1,5 @@
-/* If using Tailwind - add this after your Tailwind directives */
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/* Modern Tailwind v4 Engine Injection */
+@import "tailwindcss";
 
 /* 
   GLOBAL TEXT SELECTION CONTROL

@@ -2881,7 +2881,6 @@
 //     </div>
 //   );
 // }
-
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import { useLanguage } from "../context/LanguageContext";
 import yaml from "js-yaml";
@@ -3067,7 +3066,10 @@ export default function MapEditor() {
   useEffect(() => { canvasInitializedRef.current = canvasInitialized; }, [canvasInitialized]);
 
   // Speed Configuration
+  // tempSpeed lives here (not inside the modal) so typing in the speed modal is not
+  // reset when MapEditor re-renders (e.g. on every mouse move).
   const [speedModalNode, setSpeedModalNode] = useState(null);
+  const [tempSpeed, setTempSpeed] = useState(0.0);
 
   // Annotation State
   const [tool, setTool] = useState("pan");
@@ -3121,7 +3123,7 @@ export default function MapEditor() {
   const [draggingArrowInfo, setDraggingArrowInfo] = useState(null);
   const [hoveredArrowControl, setHoveredArrowControl] = useState(null);
 
-  // ✅ FIX #2: Arrow Drawing State - track corner node clicks for finishing detection
+  // Arrow Drawing State - track corner node clicks for finishing detection
   const [lastClickedCornerNodeId, setLastClickedCornerNodeId] = useState(null);
   const cornerClickTimeRef = useRef(0);
 
@@ -3156,9 +3158,14 @@ export default function MapEditor() {
   useEffect(() => { mapMsgRef.current = mapMsg; }, [mapMsg]);
   useEffect(() => { editableMapRef.current = editableMap; }, [editableMap]);
 
-  // Robot IP Modal State
+  // Robot SSH Modal State
+  // Only the robot IP is entered by the user (and remembered). The SSH username,
+  // password and target folder are fixed constants in main.js.
+  const savedConn = (() => {
+    try { return JSON.parse(localStorage.getItem("mapEditorRobotConn")) || {}; } catch { return {}; }
+  })();
   const [showRobotIpModal, setShowRobotIpModal] = useState(false);
-  const [robotIp, setRobotIp] = useState("");
+  const [robotIp, setRobotIp] = useState(savedConn.ip || "");
   const [sendingStatus, setSendingStatus] = useState("");
   const [currentSendType, setCurrentSendType] = useState(null);
 
@@ -3221,15 +3228,12 @@ export default function MapEditor() {
     });
   };
 
-  // ✅ ZOOM FIX
-  // The canvas is drawn as: translate(offset) -> scale(scale). Changing only `scale`
-  // therefore scales everything around the top-left corner of the map, which is why the
-  // map "ran away" to a corner. To zoom around a fixed screen point (anchorX, anchorY)
-  // we must also move the offset so the map point under that anchor stays put:
+  // ZOOM
+  // The canvas is drawn as: translate(offset) -> scale(scale). To zoom around a fixed
+  // screen point (anchorX, anchorY) the offset must move too:
   //     offset' = anchor - (anchor - offset) * (newScale / oldScale)
-  // The anchor is expressed in the canvas' own (un-rotated) pixel space. The view
-  // rotation is applied around the canvas center, so the center is a fixed point of that
-  // rotation and zooming around the center is correct for every rotation angle.
+  // The view rotation is applied around the canvas center, so the center is a fixed point
+  // of that rotation and zooming around the center is correct for every rotation angle.
   const MIN_ZOOM = 0.1;
   const MAX_ZOOM = 5;
 
@@ -3308,7 +3312,7 @@ export default function MapEditor() {
 
   // Short labels used ONLY for drawing on the canvas / exported PNG-PGM.
   // The real node.label (e.g. "waypointforcorner_1") is never changed, so
-  // JSON / YAML / ZIP / DB exports keep the full names.
+  // JSON / YAML / ZIP exports keep the full names.
   const SHORT_LABEL_PREFIX = {
     waypointforcorner: "wpc",
     waypoint: "wp",
@@ -3351,7 +3355,7 @@ export default function MapEditor() {
     return inside;
   };
 
-  // ✅ Curve control-point math, shared by the renderer, the hit-tester, and the drag handler.
+  // Curve control-point math, shared by the renderer, the hit-tester, and the drag handler.
   // `bends` is an object keyed by segment index -> a signed canvas-space bow amount.
   // If a segment has no entry in `bends`, we fall back to the original alternating bow so
   // arrows look exactly the same as before until the user actually drags a handle.
@@ -3370,7 +3374,6 @@ export default function MapEditor() {
     return { x: mx + px * bowSigned, y: my + py * bowSigned, len, px, py, mx, my, bowSigned };
   };
 
-  // ✅ FIX #1: IMPROVED CURVE DIRECTION CALCULATION (now also drag-overridable per segment)
   const drawSmoothArrowPath = (ctx, pts, bends = {}, curveAllSegments = false) => {
     if (!pts || pts.length < 2) return;
     ctx.beginPath();
@@ -3392,22 +3395,10 @@ export default function MapEditor() {
 
   // Walks the arrow graph to produce an ordered node sequence for export.
   //
-  // ⚠️ FIXED (export truncation bug): the previous version walked every
-  // disconnected chain/loop in the arrow graph, but then kept ONLY the single
-  // longest chain and silently discarded every other chain — on the theory
-  // that a shorter chain was "almost always a stray/duplicate connection".
-  // In practice, a route is very often drawn in more than one "connect" tool
-  // session (e.g. corner1→wp1→wp2→corner2, then later corner2→wp3→wp4→corner3).
-  // If the two segments end up as two graph-disconnected chains for any
-  // reason (a missing/duplicate arrow at the join, editing history, etc.),
-  // the old code would export only the first, longer chain and silently drop
-  // the rest of the route — exactly the truncated-JSON bug being fixed here.
-  //
-  // This version still finds every disconnected chain/loop, but instead of
-  // discarding all but the longest, it concatenates ALL of them, in the order
-  // they were discovered (which follows arrow-creation order). That preserves
-  // every node the user actually placed and connected, even if the graph has
-  // more than one component.
+  // Finds every disconnected chain/loop in the arrow graph and concatenates ALL of them,
+  // in the order they were discovered (which follows arrow-creation order). A route is
+  // often drawn in more than one "connect" session; keeping only the longest chain would
+  // silently drop the rest of the route (the old truncated-export bug).
   const getOrderedNodesFromArrows = (arrowList, allNodes) => {
     if (arrowList.length === 0) return [];
 
@@ -3439,17 +3430,8 @@ export default function MapEditor() {
 
       // A route may intentionally be a closed loop, for example:
       // waypointforcorner_8 -> waypoint_4 -> waypointforcorner_1
-      // while waypointforcorner_1 is also the first node in the exported path.
-      //
-      // The old exporter stopped as soon as it saw the already-visited start
-      // node, so the final closing connection was present on the canvas but
-      // waypointforcorner_1 was NOT emitted after waypoint_4 in JSON/YAML.
-      //
-      // For a genuine loop, repeat the starting node once at the end. This
-      // makes the exported linear waypoint sequence explicitly represent the
-      // final edge back to the start:
-      //   ... -> waypoint_4 -> waypointforcorner_1
-      //
+      // For a genuine loop, repeat the starting node once at the end so the exported
+      // linear waypoint sequence explicitly represents the final edge back to the start.
       // Do NOT do this for an open chain that merely ends at another node.
       if (currentId === startId && ordered.length > 1) {
         const startNode = allNodes.find(n => n.id === startId);
@@ -3465,18 +3447,12 @@ export default function MapEditor() {
       if (!toIds.has(id) && !visitedGlobal.has(id)) chains.push(walkFrom(id));
     });
     // Anything left over belongs to a closed loop with no natural start — walk those too.
-    // walkFrom() also repeats the start node once when it detects a true closed loop,
-    // so the closing edge is explicitly represented in JSON/YAML.
     allIds.forEach(id => {
       if (!visitedGlobal.has(id)) chains.push(walkFrom(id));
     });
 
     if (chains.length === 0) return [];
 
-    // Concatenate every chain, in discovery order, instead of keeping only the
-    // longest one. This is what makes a route that was drawn across multiple
-    // "connect" sessions (and ended up graph-disconnected) export in full,
-    // rather than having its later segments silently dropped.
     return chains.flat();
   };
 
@@ -3496,22 +3472,22 @@ export default function MapEditor() {
   const buildWaypointsArray = (nodesWithYaw, missionType) => {
     let stationCount = 0;
     return nodesWithYaw.map(node => {
-      const waypoint = { 
-        x: parseFloat(node.rosX.toFixed(2)), 
-        y: parseFloat(node.rosY.toFixed(2)), 
-        theta: parseFloat((node.yaw * Math.PI / 180).toFixed(6)), 
-        type: node.type, 
-        mission: missionType, 
+      const waypoint = {
+        x: parseFloat(node.rosX.toFixed(2)),
+        y: parseFloat(node.rosY.toFixed(2)),
+        theta: parseFloat((node.yaw * Math.PI / 180).toFixed(6)),
+        type: node.type,
+        mission: missionType,
         rotation: "auto",
         label: node.label
       };
       if (node.speed !== undefined && node.speed !== null) {
         waypoint.speed = node.speed;
       }
-      if (node.type === "station") { 
-        stationCount++; 
-        waypoint.name = node.label || `station_${stationCount}`; 
-        waypoint.plc_feedback = `I0.${stationCount}`; 
+      if (node.type === "station") {
+        stationCount++;
+        waypoint.name = node.label || `station_${stationCount}`;
+        waypoint.plc_feedback = `I0.${stationCount}`;
       }
       return waypoint;
     });
@@ -3527,7 +3503,7 @@ export default function MapEditor() {
         const wpLabel = wp.type === "waypointforcorner"
           ? `WPC${nodeNumber}`
           : `WP${nodeNumber}`;
-        
+
         s += `\n# ── ${wpLabel}: (${wp.x}, ${wp.y}) ──────────────────────────────\n`;
         s += `- x:           ${wp.x}\n`;
         s += `  y:           ${wp.y}\n`;
@@ -3538,14 +3514,14 @@ export default function MapEditor() {
         if (wp.speed !== undefined) {
           s += `  speed:       ${wp.speed}\n`;
         }
-        if (wp.type === "station") { 
-          if (wp.name) s += `  name:        "${wp.name}"\n`; 
-          if (wp.plc_feedback) s += `  plc_feedback: "${wp.plc_feedback}"\n`; 
+        if (wp.type === "station") {
+          if (wp.name) s += `  name:        "${wp.name}"\n`;
+          if (wp.plc_feedback) s += `  plc_feedback: "${wp.plc_feedback}"\n`;
         }
       });
       return s;
     };
-    
+
     let result = `# Waypoint configuration\n\nwaypoints:`;
     result += renderSection(forwardWaypoints, "FORWARD PATH");
     if (reverseWaypoints.length > 0) {
@@ -3555,45 +3531,45 @@ export default function MapEditor() {
   };
 
   const handleSaveYAML = async () => {
-    if (!mapMsg || !mapParamsRef.current) { 
-      await showAlert("No map loaded!", 'warning'); 
-      return; 
+    if (!mapMsg || !mapParamsRef.current) {
+      await showAlert("No map loaded!", 'warning');
+      return;
     }
-    if (nodes.length === 0) { 
-      await showAlert("No nodes to export!", 'warning'); 
-      return; 
+    if (nodes.length === 0) {
+      await showAlert("No nodes to export!", 'warning');
+      return;
     }
 
     try {
       const forwardArrows = arrows.filter(a => a.direction !== "reverse");
       const reverseArrows = arrows.filter(a => a.direction === "reverse");
-      
-      let forwardNodes = forwardArrows.length > 0 
-        ? getOrderedNodesFromArrows(forwardArrows, nodes) 
+
+      let forwardNodes = forwardArrows.length > 0
+        ? getOrderedNodesFromArrows(forwardArrows, nodes)
         : nodes;
-      
+
       let reverseNodes = [];
-      
+
       if (reverseArrows.length > 0) {
         reverseNodes = getOrderedNodesFromArrows(reverseArrows, nodes);
       } else if (forwardNodes.length > 1) {
         reverseNodes = [...forwardNodes].reverse();
       }
-      
-      const forwardWPs = forwardNodes.length > 0 
+
+      const forwardWPs = forwardNodes.length > 0
         ? buildWaypointsArray(buildNodesWithYaw(forwardNodes, forwardArrows), "forward")
         : [];
-      
+
       let reverseWPs = [];
       if (reverseNodes.length > 0) {
         const reverseNodesWithYaw = buildNodesWithYaw(reverseNodes, reverseArrows);
         reverseWPs = buildWaypointsArray(reverseNodesWithYaw, "reverse");
       }
-      
+
       const yamlContent = buildYAMLString(forwardWPs, reverseWPs);
       const blob = new Blob([yamlContent], { type: 'application/x-yaml' });
       await downloadFile(blob, `${mapName || 'map'}_waypoints.yaml`);
-      
+
       const speedCount = [...forwardWPs, ...reverseWPs].filter(wp => wp.speed !== undefined).length;
       await showAlert(`✅ YAML exported!\n📍 ${forwardWPs.length} forward, ${reverseWPs.length} reverse waypoints\n⚡ ${speedCount} nodes have custom speeds`, 'success');
     } catch (err) {
@@ -3603,30 +3579,30 @@ export default function MapEditor() {
   };
 
   const handleSaveJSON = async () => {
-    if (!mapMsg || !mapParamsRef.current) { 
-      await showAlert("No map loaded!", 'warning'); 
-      return; 
+    if (!mapMsg || !mapParamsRef.current) {
+      await showAlert("No map loaded!", 'warning');
+      return;
     }
-    if (nodes.length === 0) { 
-      await showAlert("No nodes to export!", 'warning'); 
-      return; 
+    if (nodes.length === 0) {
+      await showAlert("No nodes to export!", 'warning');
+      return;
     }
 
     try {
       const forwardArrows = arrows.filter(a => a.direction !== "reverse");
       let forwardNodes = forwardArrows.length > 0 ? getOrderedNodesFromArrows(forwardArrows, nodes) : nodes;
       const forwardWPs = buildWaypointsArray(buildNodesWithYaw(forwardNodes, forwardArrows), "forward");
-      
+
       const jsonOutput = {
         waypoints: forwardWPs,
         total_nodes: forwardWPs.length,
         timestamp: Date.now(),
         map_name: mapName || 'map'
       };
-      
+
       const blob = new Blob([JSON.stringify(jsonOutput, null, 2)], { type: 'application/json' });
       await downloadFile(blob, `${mapName || 'map'}_waypoints.json`);
-      
+
       const speedCount = forwardWPs.filter(wp => wp.speed !== undefined).length;
       await showAlert(`✅ JSON exported!\n📍 ${forwardWPs.length} waypoints\n⚡ ${speedCount} nodes have custom speeds`, 'success');
     } catch (err) {
@@ -3637,9 +3613,7 @@ export default function MapEditor() {
 
   // History stores COMPLETE post-action snapshots.
   // Every user action appends its resulting state; Undo moves to the previous
-  // snapshot and Redo moves forward again. This prevents the old bug where
-  // saveToHistory() captured the state BEFORE deletion, causing Undo/Redo to
-  // appear reversed.
+  // snapshot and Redo moves forward again.
   const cloneHistoryState = (state) => ({
     nodes: JSON.parse(JSON.stringify(state.nodes || [])),
     arrows: JSON.parse(JSON.stringify(state.arrows || [])),
@@ -3780,7 +3754,7 @@ export default function MapEditor() {
     mq.addEventListener('change', h);
     return () => mq.removeEventListener('change', h);
   }, []);
-  
+
   const toggleDarkMode = () => setDarkMode(p => !p);
   useEffect(() => { localStorage.setItem("mapEditorDarkMode", JSON.stringify(darkMode)); }, [darkMode]);
 
@@ -3843,13 +3817,18 @@ export default function MapEditor() {
   }, [mapMsg, editableMap, nodes, arrows, zones, currentZonePoints, mapName, rotation, tool, nodeType, eraseMode, eraseRadius, zoomState]);
 
   const openSpeedModal = (node) => {
-    setSpeedModalNode({ ...node, speed: node.speed !== undefined ? node.speed : 0.0 });
+    setTempSpeed(node.speed !== undefined && node.speed !== null ? node.speed : 0.0);
+    setSpeedModalNode({ ...node });
   };
 
-  const SpeedModal = () => {
+  // Rendered as a plain function call (not a nested component) so its inputs keep
+  // focus/state while MapEditor re-renders.
+  const renderSpeedModal = () => {
     if (!speedModalNode) return null;
-    const [tempSpeed, setTempSpeed] = useState(speedModalNode.speed !== undefined ? speedModalNode.speed : 0.0);
-    
+    const onSpeedChange = (e) => {
+      const v = parseFloat(e.target.value);
+      setTempSpeed(isNaN(v) ? 0.0 : v);
+    };
     return (
       <div style={{
         position: 'fixed', inset: 0,
@@ -3878,7 +3857,7 @@ export default function MapEditor() {
                 max="2.0"
                 step="0.01"
                 value={tempSpeed}
-                onChange={e => setTempSpeed(parseFloat(e.target.value))}
+                onChange={onSpeedChange}
                 style={{ flex: 1 }}
               />
               <input
@@ -3887,7 +3866,7 @@ export default function MapEditor() {
                 max="2.0"
                 step="0.01"
                 value={tempSpeed}
-                onChange={e => setTempSpeed(parseFloat(e.target.value))}
+                onChange={onSpeedChange}
                 style={{ ...styles.input, width: '80px', margin: 0 }}
               />
               <span>m/s</span>
@@ -3902,6 +3881,7 @@ export default function MapEditor() {
                 const nextNodes = nodesRef.current.map(n =>
                   n.id === speedModalNode.id ? { ...n, speed: finalSpeed } : n
                 );
+                nodesRef.current = nextNodes;
                 setNodes(nextNodes);
                 recordHistoryState({ nodes: nextNodes });
                 setSpeedModalNode(null);
@@ -3915,15 +3895,15 @@ export default function MapEditor() {
 
   const eraseAtClient = (clientX, clientY) => {
     if (!mapMsg) return;
-    if (eraseMode === "objects") { 
-      const c = clientToCanvasCoords(clientX, clientY); 
-      eraseObjectsAt(c.x, c.y); 
+    if (eraseMode === "objects") {
+      const c = clientToCanvasCoords(clientX, clientY);
+      eraseObjectsAt(c.x, c.y);
     }
-    else if (eraseMode === "noise") { 
-      eraseNoiseAt(clientX, clientY); 
+    else if (eraseMode === "noise") {
+      eraseNoiseAt(clientX, clientY);
     }
-    else if (eraseMode === "hand") { 
-      startHandErase(clientX, clientY); 
+    else if (eraseMode === "hand") {
+      startHandErase(clientX, clientY);
     }
   };
 
@@ -4193,6 +4173,8 @@ export default function MapEditor() {
     }
   };
 
+  // Live /map subscription (rosbridge connection owned by ROSContext). This is only for
+  // loading the map from the running robot; file sending no longer uses rosbridge.
   useEffect(() => {
     if (!ros || !rosConnected) return;
 
@@ -4248,36 +4230,36 @@ export default function MapEditor() {
   }, [ros, rosConnected]);
 
   const saveMapToComputer = async () => {
-    if (!mapMsg || !mapParamsRef.current) { 
-      await showAlert("No map loaded!", 'warning'); 
-      return; 
+    if (!mapMsg || !mapParamsRef.current) {
+      await showAlert("No map loaded!", 'warning');
+      return;
     }
-    
+
     try {
       const { width, height } = mapMsg, { resolution, originX, originY } = mapParamsRef.current, SF = 1;
       const canvas = document.createElement('canvas');
       const ctx = canvas.getContext('2d');
       canvas.width = (rotation === 90 || rotation === 270) ? height*SF : width*SF;
       canvas.height = (rotation === 90 || rotation === 270) ? width*SF : height*SF;
-      ctx.fillStyle = 'white'; 
+      ctx.fillStyle = 'white';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
-      ctx.save(); 
+      ctx.save();
       ctx.scale(SF, SF);
-      
+
       if (rotation !== 0) {
         const cX = canvas.width/(2*SF), cY = canvas.height/(2*SF);
-        ctx.translate(cX, cY); 
+        ctx.translate(cX, cY);
         ctx.rotate(rotation * Math.PI / 180);
         ctx.translate(rotation===90||rotation===270 ? -cY : -cX, rotation===90||rotation===270 ? -cX : -cY);
       }
-      
+
       drawMapToCanvas(ctx, mapMsg.data, width, height, SF);
       drawAnnotations(ctx, SF);
       ctx.restore();
-      
+
       const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
       const pgmData = new Uint8Array(canvas.width * canvas.height);
-      
+
       for (let y = 0; y < canvas.height; y++) {
         for (let x = 0; x < canvas.width; x++) {
           const i = (y*canvas.width+x)*4;
@@ -4286,63 +4268,63 @@ export default function MapEditor() {
           );
         }
       }
-      
+
       const pgmHeader = `P5\n${canvas.width} ${canvas.height}\n255\n`;
       const pgmBlob = new Blob([new TextEncoder().encode(pgmHeader), pgmData], { type: 'image/x-portable-graymap' });
-      
+
       let yamlContent = `image: ${mapName || 'map'}.pgm\nmode: trinary\nresolution: ${(resolution/SF).toFixed(6)}\norigin: [${originX.toFixed(6)}, ${originY.toFixed(6)}, 0]\nnegate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.25\n`;
-      
+
       const forwardArrows = arrows.filter(a => a.direction !== "reverse");
       let forwardNodes = forwardArrows.length > 0 ? getOrderedNodesFromArrows(forwardArrows, nodes) : nodes;
       const forwardWPs = buildWaypointsArray(buildNodesWithYaw(forwardNodes, forwardArrows), "forward");
-      
+
       const jsonOutput = { waypoints: forwardWPs, total_nodes: forwardWPs.length };
-      
+
       await downloadFile(pgmBlob, `${mapName||'map'}.pgm`);
       await new Promise(resolve => setTimeout(resolve, 250));
       await downloadFile(new Blob([yamlContent], { type: 'application/x-yaml' }), `${mapName||'map'}.yaml`);
       await new Promise(resolve => setTimeout(resolve, 250));
       await downloadFile(new Blob([JSON.stringify(jsonOutput, null, 2)], { type: 'application/json' }), `${mapName||'map'}_waypoints.json`);
-      
+
       const speedCount = forwardWPs.filter(wp => wp.speed !== undefined).length;
       await showAlert(`✅ Map exported successfully!\n📄 PGM + YAML + JSON saved\n📍 ${nodes.length} nodes on map\n⚡ ${speedCount} nodes have custom speeds`, 'success');
-    } catch (e) { 
-      console.error("Export error:", e); 
-      await showAlert(`Error exporting map:\n${e.message}`, 'error'); 
+    } catch (e) {
+      console.error("Export error:", e);
+      await showAlert(`Error exporting map:\n${e.message}`, 'error');
     }
   };
 
   const saveCompleteMap = async () => {
-    if (!mapMsg || !mapParamsRef.current) { 
-      await showAlert("No map loaded!", 'warning'); 
-      return; 
+    if (!mapMsg || !mapParamsRef.current) {
+      await showAlert("No map loaded!", 'warning');
+      return;
     }
-    
+
     try {
       const { width, height } = mapMsg, { resolution, originX, originY } = mapParamsRef.current, SF = 1;
       const canvas = document.createElement('canvas');
       const ctx = canvas.getContext('2d');
       canvas.width = (rotation===90||rotation===270)?height*SF:width*SF;
       canvas.height = (rotation===90||rotation===270)?width*SF:height*SF;
-      ctx.fillStyle = 'white'; 
+      ctx.fillStyle = 'white';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
-      ctx.save(); 
+      ctx.save();
       ctx.scale(SF, SF);
-      
+
       if (rotation !== 0) {
         const cX = canvas.width/(2*SF), cY = canvas.height/(2*SF);
-        ctx.translate(cX, cY); 
+        ctx.translate(cX, cY);
         ctx.rotate(rotation * Math.PI / 180);
         ctx.translate(rotation===90||rotation===270?-cY:-cX, rotation===90||rotation===270?-cX:-cY);
       }
-      
+
       drawMapToCanvas(ctx, mapMsg.data, width, height, SF);
       drawAnnotations(ctx, SF);
       ctx.restore();
-      
+
       const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
       const pgmData = new Uint8Array(canvas.width * canvas.height);
-      
+
       for (let y = 0; y < canvas.height; y++) {
         for (let x = 0; x < canvas.width; x++) {
           const i = (y*canvas.width+x)*4;
@@ -4351,35 +4333,35 @@ export default function MapEditor() {
           );
         }
       }
-      
+
       const pgmHeader = `P5\n${canvas.width} ${canvas.height}\n255\n`;
       const pgmBlob = new Blob([new TextEncoder().encode(pgmHeader), pgmData], { type: 'image/x-portable-graymap' });
-      
+
       let yamlContent = `image: ${mapName||'map'}.pgm\nmode: trinary\nresolution: ${(resolution/SF).toFixed(6)}\norigin: [${originX.toFixed(6)}, ${originY.toFixed(6)}, 0]\nnegate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.25\n`;
-      
+
       const completeMapData = {
-        version: "2.0", 
-        mapName, 
-        rotation, 
+        version: "2.0",
+        mapName,
+        rotation,
         timestamp: Date.now(),
         nodes: nodes.map(n => ({ id: n.id, type: n.type, label: n.label, rosX: n.rosX, rosY: n.rosY, yaw: n.yaw || 0, speed: n.speed })),
         arrows: arrows.map(a => ({ id: a.id, fromId: a.fromId, toId: a.toId, points: a.points || [], direction: a.direction, curved: a.curved === true, bends: a.bends || {} })),
         zones: zones.map(z => ({ id: z.id, name: z.name, type: z.type, points: z.points.map(p => ({ rosX: p.rosX, rosY: p.rosY, canvasX: p.canvasX, canvasY: p.canvasY })) }))
       };
-      
+
       const zip = new JSZip();
       zip.file(`${mapName||'map'}.pgm`, pgmBlob);
       zip.file(`${mapName||'map'}.yaml`, yamlContent);
       zip.file(`${mapName||'map'}_data.json`, JSON.stringify(completeMapData, null, 2));
-      
+
       const zipBlob = await zip.generateAsync({ type: 'blob' });
       await downloadFile(zipBlob, `${mapName||'map'}_complete.zip`);
-      
+
       const speedCount = nodes.filter(n => n.speed !== undefined && n.speed !== null).length;
       await showAlert(`✅ Complete map saved!\n📦 ZIP archive created\n📍 ${nodes.length} nodes, ${arrows.length} arrows, ${zones.length} zones\n⚡ ${speedCount} nodes have custom speeds`, 'success');
-    } catch (e) { 
-      console.error("Save error:", e); 
-      await showAlert(`Error saving complete map:\n${e.message}`, 'error'); 
+    } catch (e) {
+      console.error("Save error:", e);
+      await showAlert(`Error saving complete map:\n${e.message}`, 'error');
     }
   };
 
@@ -4413,22 +4395,22 @@ export default function MapEditor() {
   };
 
   const loadJSONWithMap = async () => {
-    if (!mapMsg) { 
-      await showAlert("Please load a map first before importing JSON!", 'warning'); 
-      return; 
+    if (!mapMsg) {
+      await showAlert("Please load a map first before importing JSON!", 'warning');
+      return;
     }
-    
+
     const fileInput = document.createElement('input');
-    fileInput.type = 'file'; 
+    fileInput.type = 'file';
     fileInput.accept = '.json';
     fileInput.onchange = async (e) => {
-      const file = e.target.files[0]; 
+      const file = e.target.files[0];
       if (!file) return;
-      
+
       try {
         const data = JSON.parse(await file.text());
         let loadedNodes = [];
-        
+
         if (data.waypoints && Array.isArray(data.waypoints)) {
           loadedNodes = data.waypoints.map((wp, idx) => {
             const canvas = rosToCanvasCoords(wp.x, wp.y);
@@ -4438,35 +4420,35 @@ export default function MapEditor() {
               label = `${wp.type}_${typeCount}`;
             }
             const yawDegrees = wp.theta ? (wp.theta * 180 / Math.PI) : 0;
-            return { 
-              id: makeId("node"), 
-              type: wp.type || "waypoint", 
+            return {
+              id: makeId("node"),
+              type: wp.type || "waypoint",
               label: label,
-              rosX: wp.x, 
-              rosY: wp.y, 
-              canvasX: canvas.x, 
-              canvasY: canvas.y, 
+              rosX: wp.x,
+              rosY: wp.y,
+              canvasX: canvas.x,
+              canvasY: canvas.y,
               yaw: yawDegrees,
               speed: wp.speed,
               ...(wp.name && { name: wp.name }),
               ...(wp.plc_feedback && { plc_feedback: wp.plc_feedback })
             };
           });
-          
+
           const loadedArrows = [];
           if (loadedNodes.length > 1) {
             for (let i = 0; i < loadedNodes.length - 1; i++) {
-              loadedArrows.push({ 
-                id: makeId("arrow"), 
-                fromId: loadedNodes[i].id, 
-                toId: loadedNodes[i+1].id, 
-                points: [], 
-                direction: "forward" 
+              loadedArrows.push({
+                id: makeId("arrow"),
+                fromId: loadedNodes[i].id,
+                toId: loadedNodes[i+1].id,
+                points: [],
+                direction: "forward"
               });
             }
           }
           setArrows(loadedArrows);
-        } 
+        }
         else if (data.nodes && Array.isArray(data.nodes)) {
           loadedNodes = data.nodes.map(node => {
             let canvasX = node.canvasX, canvasY = node.canvasY;
@@ -4475,9 +4457,9 @@ export default function MapEditor() {
               canvasX = canvas.x;
               canvasY = canvas.y;
             }
-            return { 
-              ...node, 
-              canvasX, 
+            return {
+              ...node,
+              canvasX,
               canvasY,
               yaw: node.yaw || 0,
               speed: node.speed
@@ -4485,12 +4467,12 @@ export default function MapEditor() {
           });
           if (data.arrows) setArrows(data.arrows);
         }
-        
+
         if (loadedNodes.length === 0) {
           await showAlert("No valid waypoints or nodes found in JSON file", 'warning');
           return;
         }
-        
+
         const validNodes = [];
         for (const node of loadedNodes) {
           if (isWithinMapBounds(node.rosX, node.rosY)) {
@@ -4499,26 +4481,26 @@ export default function MapEditor() {
             console.warn(`Node ${node.label} at (${node.rosX}, ${node.rosY}) is outside map bounds`);
           }
         }
-        
+
         if (validNodes.length === 0) {
           await showAlert("No nodes are within the map bounds!", 'warning');
           return;
         }
-        
+
         if (validNodes.length !== loadedNodes.length) {
           await showAlert(`⚠️ ${loadedNodes.length - validNodes.length} node(s) were outside map bounds and were skipped.\n\n✅ Imported ${validNodes.length} valid nodes.`, 'warning');
         }
-        
+
         setNodes(validNodes);
         nodesRef.current = validNodes;
-        
+
         const allIds = [...validNodes, ...arrows];
         const maxId = allIds.reduce((max, item) => {
           const idNum = parseInt(item.id?.split('_')[1]) || 0;
           return Math.max(max, idNum);
         }, 0);
         idCounter.current = maxId + 1;
-        
+
         let importedZones = [];
         if (data.zones) {
           importedZones = data.zones.filter(zone =>
@@ -4548,10 +4530,10 @@ export default function MapEditor() {
 
         const speedCount = validNodes.filter(n => n.speed !== undefined && n.speed !== null).length;
         await showAlert(`✅ JSON imported successfully!\n📍 ${validNodes.length} nodes\n⚡ ${speedCount} nodes have custom speeds`, 'success');
-        
-      } catch (err) { 
-        console.error(err); 
-        await showAlert(`Failed to load JSON:\n${err.message}`, 'error'); 
+
+      } catch (err) {
+        console.error(err);
+        await showAlert(`Failed to load JSON:\n${err.message}`, 'error');
       }
     };
     fileInput.click();
@@ -4597,29 +4579,29 @@ export default function MapEditor() {
     const canvas = rosToCanvasCoords(ros.x, ros.y);
     if (!isWithinMapBounds(ros.x, ros.y)) return;
     if (!isWithinPlaceableArea(canvas.x, canvas.y)) return;
-    
+
     const existingOfType = nodesRef.current.filter(n => n.type === nodeType);
     const nextNumber = existingOfType.length + 1;
-    
+
     let label = `${nodeType}_${nextNumber}`;
     let counter = nextNumber;
     while (nodesRef.current.some(n => n.label === label)) {
       counter++;
       label = `${nodeType}_${counter}`;
     }
-    
-    const newNode = { 
-      id: makeId("node"), 
-      type: nodeType, 
+
+    const newNode = {
+      id: makeId("node"),
+      type: nodeType,
       label: label,
-      rosX: ros.x, 
-      rosY: ros.y, 
-      canvasX: canvas.x, 
-      canvasY: canvas.y, 
+      rosX: ros.x,
+      rosY: ros.y,
+      canvasX: canvas.x,
+      canvasY: canvas.y,
       yaw: 0.0,
       speed: undefined
     };
-    
+
     const nextNodes = [...nodesRef.current, newNode];
     setNodes(nextNodes);
     recordHistoryState({ nodes: nextNodes });
@@ -4643,9 +4625,9 @@ export default function MapEditor() {
   };
 
   // Return the control point for a quadratic sub-segment [t0,t1] of an
-  // original quadratic Bezier. This is used when a corner-to-corner curve
-  // is automatically split into normal waypoint nodes: every generated
-  // arrow segment keeps the exact same curve instead of becoming straight.
+  // original quadratic Bezier. Used when a corner-to-corner curve is automatically
+  // split into normal waypoint nodes: every generated arrow segment keeps the exact
+  // same curve instead of becoming straight.
   const getQuadraticSubsegmentControlPoint = (p0, control, p2, t0, t1) => {
     const tm = (t0 + t1) / 2;
     const a = pointOnQuadratic(p0.x, p0.y, control.x, control.y, p2.x, p2.y, t0);
@@ -4676,8 +4658,7 @@ export default function MapEditor() {
   // Locate the curved arrow segment (if any) whose *drawn curve* passes near a canvas point,
   // by sampling the quadratic bezier along its length. Only segments between two "corner"
   // points (waypointforcorner nodes / mid-arrow control points) are curved, so only those
-  // are draggable. Lets the user grab the visible arrow line directly, anywhere along it,
-  // rather than needing to find a small fixed handle.
+  // are draggable.
   const findArrowCurveHitAtCanvas = (cx, cy, radius = 8) => {
     const SAMPLES = 24;
     for (let ai = arrowsRef.current.length - 1; ai >= 0; --ai) {
@@ -4712,17 +4693,12 @@ export default function MapEditor() {
 
   const AUTO_WAYPOINT_SPACING = 1.0; // meters
 
-  // Generates a chain of normal "waypoint" nodes ~1m apart between two corner points
-  // (each either a real waypointforcorner node, or a via-point captured from one — both
-  // shapes carry {id, rosX, rosY, canvasX, canvasY}), plus the arrows connecting them
-  // end-to-end. Rather than walking the straight line between the two points, the
-  // waypoints are sampled ALONG the same quadratic curve a direct corner-to-corner arrow
-  // used to be drawn with (see getSegmentControlPoint / drawSmoothArrowPath) — using the
-  // very same bow calculation — so the resulting chain of short straight segments traces
-  // that original curve instead of cutting straight across it.
+  // Generates a chain of normal "waypoint" nodes ~1m apart between two corner points,
+  // plus the arrows connecting them end-to-end. The waypoints are sampled ALONG the same
+  // quadratic curve a direct corner-to-corner arrow is drawn with, so the resulting chain
+  // of short segments traces that curve instead of cutting straight across it.
   // `accNewNodes` accumulates every node created so far in the current finish operation,
-  // so labels stay unique even when one arrow-drawing pass fills in several
-  // corner-to-corner segments back to back.
+  // so labels stay unique even when one arrow-drawing pass fills in several segments.
   const buildWaypointChainBetween = (fromPt, toPt, direction, accNewNodes) => {
     const dx = toPt.rosX - fromPt.rosX;
     const dy = toPt.rosY - fromPt.rosY;
@@ -4733,9 +4709,6 @@ export default function MapEditor() {
 
     const steps = Math.floor(dist / AUTO_WAYPOINT_SPACING);
 
-    // The original corner-to-corner curve. Every generated waypoint-to-waypoint
-    // arrow below receives the corresponding Bezier sub-segment, so the complete
-    // chain remains curved from the first waypoint-for-corner to the second.
     const originalControl = getSegmentControlPoint(
       { canvasX: fromPt.canvasX, canvasY: fromPt.canvasY },
       { canvasX: toPt.canvasX, canvasY: toPt.canvasY },
@@ -4755,9 +4728,6 @@ export default function MapEditor() {
       nodesRef.current.some(n => n.label === label) ||
       accNewNodes.some(n => n.label === label);
 
-    // Keep the parameter positions exactly tied to distance along the original
-    // corner-to-corner path. This gives us a stable curve even after rendering
-    // the route as separate arrow objects.
     const tValues = [0];
     for (let i = 1; i <= steps; i++) {
       const t = (i * AUTO_WAYPOINT_SPACING) / dist;
@@ -4791,8 +4761,6 @@ export default function MapEditor() {
         subControl
       );
 
-      // The first segment starts at the original corner node. All following
-      // segments start at the waypoint created in the previous iteration.
       const currentStartId = prevId;
 
       if (i < tValues.length - 1) {
@@ -4832,8 +4800,7 @@ export default function MapEditor() {
 
         prevId = wpNode.id;
       } else {
-        // Final generated segment ends exactly at the second
-        // waypoint-for-corner node.
+        // Final generated segment ends exactly at the second waypoint-for-corner node.
         newArrows.push({
           id: makeId("arrow"),
           fromId: currentStartId,
@@ -4851,11 +4818,11 @@ export default function MapEditor() {
 
   // Finishes the in-progress arrow at `toNode`. Walks the full chain — start node,
   // every corner via-point clicked along the way, and the end node — and for each
-  // consecutive pair that are BOTH corner points, auto-fills the straight line between
-  // them with real "waypoint" nodes every 1m instead of drawing a bare curve. Segments
-  // where either end isn't a corner stay as plain direct arrows, same as before.
-  // `extraNodesToAdd` lets the caller fold in a brand-new endpoint node (e.g. one placed
-  // by clicking empty space to finish) so everything lands in a single history step.
+  // consecutive pair that are BOTH corner points, auto-fills the stretch between
+  // them with real "waypoint" nodes every 1m. Segments where either end isn't a
+  // corner stay as plain direct arrows.
+  // `extraNodesToAdd` lets the caller fold in a brand-new endpoint node so everything
+  // lands in a single history step.
   const finishArrowAt = (toNode, viaPoints, extraNodesToAdd = []) => {
     const fromNode = nodesRef.current.find(n => n.id === arrowDrawing.fromId);
     if (!fromNode) { setArrowDrawing({ isDrawing: false, fromId: null, points: [] }); return; }
@@ -4888,7 +4855,6 @@ export default function MapEditor() {
     setLastClickedCornerNodeId(null);
   };
 
-  // ✅ FIX #2: IMPROVED ARROW CONNECTION LOGIC
   const handleConnectClick = (clientX, clientY) => {
     const c = clientToCanvasCoords(clientX, clientY);
     const node = findNodeAtCanvas(c.x, c.y, 8 / zoomState.scale);
@@ -4909,7 +4875,7 @@ export default function MapEditor() {
     if (!arrowDrawing.isDrawing) {
       // Start new arrow
       setArrowDrawing({ isDrawing: true, fromId: node.id, points: [] });
-      setLastClickedCornerNodeId(null); // Reset when starting new arrow
+      setLastClickedCornerNodeId(null);
       return;
     }
 
@@ -4922,24 +4888,20 @@ export default function MapEditor() {
 
     // Corner chaining (single click = via-point, double-click = finish) only applies
     // when the arrow STARTED at a waypointforcorner node (corner -> corner -> ...).
-    // If the arrow started at a normal node (waypoint, station, etc.), clicking a
-    // corner node finishes the arrow immediately with one click, like every other node.
+    // If the arrow started at a normal node, clicking a corner node finishes the
+    // arrow immediately with one click, like every other node.
     const startNode = nodesRef.current.find(n => n.id === arrowDrawing.fromId);
     const startedAtCorner = startNode?.type === "waypointforcorner";
 
     if (node.type === "waypointforcorner" && startedAtCorner) {
       const now = Date.now();
-      // Check if this is a double-click (same node within 500ms)
-      const isQuickDoubleClick = lastClickedCornerNodeId === node.id && 
+      const isQuickDoubleClick = lastClickedCornerNodeId === node.id &&
                                   (now - cornerClickTimeRef.current < 500);
-      
+
       if (isQuickDoubleClick) {
-        // Double-click on corner node = finish arrow there.
-        // The first click on this same node already appended it as a via-point
-        // (see the "else" branch below) at this exact location. If we don't drop
-        // that duplicate here, the final segment becomes zero-length (same start
-        // and end point), which breaks the arrowhead-direction math and makes the
-        // arrowhead point the wrong way regardless of which side the curve bows to.
+        // Double-click on corner node = finish arrow there. The first click on this same
+        // node already appended it as a via-point; drop that duplicate, otherwise the
+        // final segment becomes zero-length and breaks the arrowhead-direction math.
         const lastPt = arrowDrawing.points[arrowDrawing.points.length - 1];
         const trimmedPoints = (lastPt && lastPt.id === node.id)
           ? arrowDrawing.points.slice(0, -1)
@@ -4969,105 +4931,47 @@ export default function MapEditor() {
     setCurrentZonePoints([]); setZoneName(""); setZoneType("normal");
   };
 
-  const handleSendYAMLToRobot = async () => {
+  // ───────────────────────────────────────────────────────────────────────────
+  // SEND TO ROBOT OVER SSH (SFTP)
+  //
+  // The renderer asks the Electron main process (main.js) over IPC ("robot:send-file").
+  // main.js connects with `ssh2`, writes the file into the chosen folder on the robot
+  // (default ~/Desktop) and returns { ok, path } or { ok:false, error }.
+  // ───────────────────────────────────────────────────────────────────────────
+  const openSendModal = async (type) => {
     if (!mapName) { await showAlert("Enter a map name first!", 'warning'); return; }
     if (nodes.length === 0) { await showAlert("No nodes to send!", 'warning'); return; }
-    setCurrentSendType('yaml'); setRobotIp(""); setSendingStatus(""); setShowRobotIpModal(true);
+    setCurrentSendType(type); setSendingStatus(""); setShowRobotIpModal(true);
   };
 
-  const handleSendJSONToRobot = async () => {
-    if (!mapName) { await showAlert("Enter a map name first!", 'warning'); return; }
-    if (nodes.length === 0) { await showAlert("No nodes to send!", 'warning'); return; }
-    setCurrentSendType('json'); setRobotIp(""); setSendingStatus(""); setShowRobotIpModal(true);
+  const handleSendYAMLToRobot = () => openSendModal('yaml');
+  const handleSendJSONToRobot = () => openSendModal('json');
+
+  const closeRobotModal = () => {
+    setShowRobotIpModal(false);
+    setSendingStatus("");
   };
-
-  // ───────────────────────────────────────────────────────────────────────────
-  // SEND TO ROBOT OVER ROSBRIDGE (no Flask / SSH backend needed)
-  //
-  // Opens a short-lived rosbridge connection to ws://<robotIp>:9090, publishes the
-  // file as a JSON string on /map_editor/file_upload and waits for the robot's
-  // confirmation on /map_editor/file_upload_ack. A small ROS 2 node on the robot
-  // (map_editor_receiver.py) saves the file to ~/Desktop.
-  //
-  // The message is re-published once per second until the robot answers, because
-  // the first message can be lost while ROS 2 discovery connects the new
-  // rosbridge publisher to the receiver. The receiver just overwrites the file,
-  // so repeats are harmless.
-  // ───────────────────────────────────────────────────────────────────────────
-  const ROSBRIDGE_PORT = 9090;
-  const UPLOAD_TOPIC = "/map_editor/file_upload";
-  const UPLOAD_ACK_TOPIC = "/map_editor/file_upload_ack";
-
-  const sendFileViaRosbridge = (ip, filename, content, kind) => new Promise((resolve, reject) => {
-    if (!window.ROSLIB) { reject(new Error("ROSLIB is not loaded")); return; }
-
-    const url = `ws://${ip}:${ROSBRIDGE_PORT}`;
-    const requestId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    const remote = new window.ROSLIB.Ros({ url });
-
-    let finished = false;
-    let connected = false;
-    let retryTimer = null;
-    let timeoutTimer = null;
-    let ackTopic = null;
-
-    const finish = (err, result) => {
-      if (finished) return;
-      finished = true;
-      clearInterval(retryTimer);
-      clearTimeout(timeoutTimer);
-      try { if (ackTopic) ackTopic.unsubscribe(); } catch (_) {}
-      try { remote.close(); } catch (_) {}
-      if (err) reject(err); else resolve(result);
-    };
-
-    timeoutTimer = setTimeout(() => {
-      finish(new Error(
-        connected
-          ? "Connected to rosbridge, but the robot did not confirm. Is map_editor_receiver.py running on the robot?"
-          : `Cannot reach rosbridge at ${url}. Check the IP and that rosbridge is running.`
-      ));
-    }, 10000);
-
-    remote.on("error", () => finish(new Error(`Cannot reach rosbridge at ${url}. Check the IP and that rosbridge is running.`)));
-    remote.on("close", () => finish(new Error(`Connection to ${url} closed before the robot confirmed.`)));
-
-    remote.on("connection", () => {
-      connected = true;
-
-      ackTopic = new window.ROSLIB.Topic({ ros: remote, name: UPLOAD_ACK_TOPIC, messageType: "std_msgs/String" });
-      ackTopic.subscribe((msg) => {
-        let reply;
-        try { reply = JSON.parse(msg.data); } catch (_) { return; }
-        if (reply.request_id !== requestId) return;
-        if (reply.ok) finish(null, reply);
-        else finish(new Error(reply.error || "The robot could not save the file"));
-      });
-
-      const uploadTopic = new window.ROSLIB.Topic({ ros: remote, name: UPLOAD_TOPIC, messageType: "std_msgs/String" });
-      const payload = new window.ROSLIB.Message({
-        data: JSON.stringify({ request_id: requestId, filename, kind, content })
-      });
-      const publish = () => { if (!finished) uploadTopic.publish(payload); };
-      publish();
-      retryTimer = setInterval(publish, 1000);
-    });
-  });
 
   const executeSendToRobot = async () => {
-    if (!robotIp.trim()) { setSendingStatus("Please enter robot IP address"); return; }
     const ip = robotIp.trim();
-    const ipPattern = /^(\d{1,3}\.){3}\d{1,3}$/;
-    if (!ipPattern.test(ip)) { setSendingStatus("Please enter a valid IP address"); return; }
+    if (!ip) { setSendingStatus("Please enter robot IP address"); return; }
+    if (!/^(\d{1,3}\.){3}\d{1,3}$/.test(ip)) { setSendingStatus("Please enter a valid IP address"); return; }
+    // No preload script: the renderer talks to main.js directly (nodeIntegration is on).
+    const ipcRenderer = window.require ? window.require("electron").ipcRenderer : null;
+    if (!ipcRenderer) {
+      setSendingStatus("❌ SSH sending only works in the desktop app (Electron).");
+      return;
+    }
+
     if (currentSendType === 'yaml') setIsSavingYAML(true); else setIsSavingJSON(true);
-    setDbStatus("Sending..."); setSendingStatus("Sending...");
+    setDbStatus("Sending..."); setSendingStatus("Connecting over SSH...");
     try {
       const forwardArrows = arrows.filter(a => a.direction !== "reverse");
       const reverseArrows = arrows.filter(a => a.direction === "reverse");
-      let forwardNodes = forwardArrows.length > 0 ? getOrderedNodesFromArrows(forwardArrows, nodes) : nodes;
-      let reverseNodes = reverseArrows.length > 0 ? getOrderedNodesFromArrows(reverseArrows, nodes) : [];
+      const forwardNodes = forwardArrows.length > 0 ? getOrderedNodesFromArrows(forwardArrows, nodes) : nodes;
+      const reverseNodes = reverseArrows.length > 0 ? getOrderedNodesFromArrows(reverseArrows, nodes) : [];
       const forwardWPs = forwardNodes.length > 0 ? buildWaypointsArray(buildNodesWithYaw(forwardNodes, forwardArrows), "forward") : [];
-      let reverseWPs = reverseNodes.length > 0 ? buildWaypointsArray(buildNodesWithYaw(reverseNodes, reverseArrows), "reverse") : [];
+      const reverseWPs = reverseNodes.length > 0 ? buildWaypointsArray(buildNodesWithYaw(reverseNodes, reverseArrows), "reverse") : [];
 
       // Map names like "map/map" would be read as a folder path, so make them filename-safe.
       const safeName = mapName.replace(/[^A-Za-z0-9._-]+/g, "_");
@@ -5083,15 +4987,27 @@ export default function MapEditor() {
         count = forwardWPs.length;
       }
 
-      const result = await sendFileViaRosbridge(ip, filename, content, currentSendType);
+      const result = await ipcRenderer.invoke("robot:send-file", {
+        host: ip,
+        filename, content,
+      });
+      if (!result?.ok) throw new Error(result?.error || "The robot could not save the file");
+
+      // Remember connection details (NOT the password) for next time.
+      try {
+        localStorage.setItem("mapEditorRobotConn", JSON.stringify({ ip }));
+      } catch (_) {}
 
       setDbStatus("Sent!"); setSendingStatus("✅ Sent successfully!");
       setTimeout(() => {
-        setShowRobotIpModal(false);
-        showAlert(`${currentSendType.toUpperCase()} sent to robot at ${ip}!\n📍 ${count} waypoints sent\n📁 Saved as ${result.path || filename}`, 'success');
-      }, 1000);
-    } catch (e) { console.error(e); setDbStatus("Failed!"); setSendingStatus(`❌ Failed: ${e.message}`); }
-    finally { setIsSavingYAML(false); setIsSavingJSON(false); }
+        closeRobotModal();
+        showAlert(`${currentSendType.toUpperCase()} sent to robot at ${ip}!\n📍 ${count} waypoints sent\n📁 Saved as ${result.path}`, 'success');
+      }, 800);
+    } catch (e) {
+      console.error(e); setDbStatus("Failed!"); setSendingStatus(`❌ Failed: ${e.message}`);
+    } finally {
+      setIsSavingYAML(false); setIsSavingJSON(false);
+    }
   };
 
   const handleClearAll = async () => {
@@ -5273,7 +5189,7 @@ export default function MapEditor() {
 
     if (draggingArrowRef.current) {
       // Project the cursor onto the perpendicular of the segment's straight line.
-      // The *sign* of this projection is what determines which side the curve bows to —
+      // The *sign* of this projection determines which side the curve bows to —
       // dragging across the straight line flips the sign, which flips the curve.
       const { arrowId, segmentIndex, mx, my, px, py, len } = draggingArrowRef.current;
       const vx = cc.x - mx, vy = cc.y - my;
@@ -5344,7 +5260,7 @@ export default function MapEditor() {
     const cW = container.clientWidth, cH = container.clientHeight;
     if (cW <= 0 || cH <= 0) return;
     canvas.width = cW; canvas.height = cH;
-        ctx.clearRect(0, 0, cW, cH);
+    ctx.clearRect(0, 0, cW, cH);
     const mapToRender = editableMap || mapMsg;
     if (!mapToRender || !canvasInitialized) {
       ctx.fillStyle = T.surface; ctx.fillRect(0, 0, cW, cH);
@@ -5418,9 +5334,8 @@ export default function MapEditor() {
         ctx.closePath(); ctx.fillStyle = color; ctx.fill();
       }
 
-      // Direct-drag feedback: no fixed handle dot — instead, re-stroke just the curved
-      // segment the user is hovering or dragging with a bright, thicker overlay so it's
-      // clear the whole line is grabbable, not just a single point.
+      // Direct-drag feedback: re-stroke just the curved segment the user is hovering or
+      // dragging with a bright, thicker overlay so it's clear the whole line is grabbable.
       if (tool === "pan") {
         for (let i = 0; i < ap.length - 1; i++) {
           const p1 = ap[i], p2 = ap[i + 1];
@@ -5485,7 +5400,10 @@ export default function MapEditor() {
     ctx.restore();
   }, [mapMsg, editableMap, zoomState, nodes, arrows, zones, currentZonePoints, cursorCoords, T, rotation, arrowDrawing, cropState, zoneType, tool, canvasInitialized, draggingNodeId, hoveredNodeId, draggingArrowInfo, hoveredArrowControl, canvasSize]);
 
-  const MapLoaderModal = () => {
+  // Modals below are plain render functions (called as {renderX()}), NOT nested
+  // components. A component defined inside MapEditor gets a new identity on every render,
+  // which would remount it (and drop input focus) on every keystroke / mouse move.
+  const renderMapLoaderModal = () => {
     const handleZipSelect = async (e) => {
       const file = e.target.files[0]; if (!file) return;
       await loadMapFromZip(file);
@@ -5511,29 +5429,34 @@ export default function MapEditor() {
     );
   };
 
-  const RobotIpModal = () => (
-    <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.7)', backdropFilter:'blur(4px)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:1000 }}>
-      <div style={{ background:T.card, padding:24, borderRadius:12, border:`1px solid ${T.border}`, borderTop:`3px solid #10b981`, maxWidth:400, width:'90%', boxShadow:'0 20px 60px rgba(0,0,0,0.5)' }}>
-        <h3 style={{ margin:'0 0 20px 0', color:T.text }}>{currentSendType === 'yaml' ? '📤 Send YAML to Robot' : '📤 Send JSON to Robot'}</h3>
-        <div style={{ marginBottom:20 }}>
+  const renderRobotModal = () => {
+    const busy = isSavingYAML || isSavingJSON;
+    return (
+      <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.7)', backdropFilter:'blur(4px)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:1000 }}>
+        <div style={{ background:T.card, padding:24, borderRadius:12, border:`1px solid ${T.border}`, borderTop:`3px solid #10b981`, maxWidth:420, width:'90%', boxShadow:'0 20px 60px rgba(0,0,0,0.5)' }}>
+          <h3 style={{ margin:'0 0 16px 0', color:T.text }}>{currentSendType === 'yaml' ? '📤 Send YAML to Robot (SSH)' : '📤 Send JSON to Robot (SSH)'}</h3>
+
           <label style={styles.label}>Robot IP Address</label>
-          <input type="text" value={robotIp} onChange={e => setRobotIp(e.target.value)} placeholder="e.g., 192.168.1.100" style={styles.input} autoFocus />
-          <p style={styles.hint}>IP of the robot where rosbridge is running (port 9090). The file is saved to the robot's Desktop.</p>
-        </div>
-        {sendingStatus && (
-          <div style={{ padding:'10px', borderRadius:8, marginBottom:20, background: sendingStatus.includes('✅') ? '#10b981' : sendingStatus.includes('❌') ? '#ef4444' : '#3b82f6', color:'white', fontSize:'14px', textAlign:'center' }}>
-            {sendingStatus}
+          <input type="text" value={robotIp} onChange={e => setRobotIp(e.target.value)}
+                 onKeyDown={e => { if (e.key === 'Enter' && !busy) executeSendToRobot(); }}
+                 placeholder="e.g., 192.168.1.100" style={styles.input} autoFocus />
+          <p style={styles.hint}>Enter the robot's IP. The file is saved to the robot's Desktop folder.</p>
+
+          {sendingStatus && (
+            <div style={{ padding:10, borderRadius:8, margin:'12px 0', background: sendingStatus.includes('✅') ? '#10b981' : sendingStatus.includes('❌') ? '#ef4444' : '#3b82f6', color:'white', fontSize:14, textAlign:'center' }}>
+              {sendingStatus}
+            </div>
+          )}
+          <div style={{ display:'flex', gap:10, justifyContent:'flex-end', marginTop:12 }}>
+            <button onClick={closeRobotModal} style={styles.button}>Cancel</button>
+            <button onClick={executeSendToRobot} style={{ ...styles.buttonAction, background:'#10b981' }} disabled={busy}>
+              {busy ? 'Sending...' : 'Send'}
+            </button>
           </div>
-        )}
-        <div style={{ display:'flex', gap:10, justifyContent:'flex-end' }}>
-          <button onClick={() => { setShowRobotIpModal(false); setSendingStatus(""); }} style={styles.button}>Cancel</button>
-          <button onClick={executeSendToRobot} style={{ ...styles.buttonAction, background:'#10b981' }} disabled={isSavingYAML || isSavingJSON}>
-            {isSavingYAML || isSavingJSON ? 'Sending...' : 'Send'}
-          </button>
         </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   const getCanvasCursor = () => {
     if (draggingArrowInfo) return "grabbing";
@@ -5551,9 +5474,9 @@ export default function MapEditor() {
   return (
     <div style={styles.container}>
       {ModalComponent}
-      {speedModalNode && <SpeedModal />}
-      {mapLoaderActive && <MapLoaderModal />}
-      {showRobotIpModal && <RobotIpModal />}
+      {speedModalNode && renderSpeedModal()}
+      {mapLoaderActive && renderMapLoaderModal()}
+      {showRobotIpModal && renderRobotModal()}
 
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12, flexWrap:"wrap", gap:10 }}>
         <div style={{ display:'flex', alignItems:'center', gap:12, flexWrap:'wrap' }}>
@@ -5645,7 +5568,7 @@ export default function MapEditor() {
                 <button onClick={loadJSONWithMap} style={{ ...styles.buttonAction, background:T.accent, color:'white' }}><FaUpload /> Import Annotations</button>
               </div>
               <div style={styles.buttonGroup}>
-                <label style={styles.label}>Send to Robot</label>
+                <label style={styles.label}>Send to Robot (SSH)</label>
                 <button onClick={handleSendYAMLToRobot} style={{ ...styles.buttonAction, background:'#f59e0b' }} disabled={isSavingYAML}><FaRocket /> {isSavingYAML ? "Sending..." : "Send YAML to Robot"}</button>
                 <button onClick={handleSendJSONToRobot} style={{ ...styles.buttonAction, background:'#10b981' }} disabled={isSavingJSON}><FaRocket /> {isSavingJSON ? "Sending..." : "Send JSON to Robot"}</button>
                 <div style={{ fontSize:'12px', color:T.textSecondary, marginTop:4 }}>Status: {dbStatus}</div>
@@ -5738,7 +5661,7 @@ export default function MapEditor() {
           <div style={styles.canvasContainer}>
             <div style={styles.zoomControls}>
               <div style={{ textAlign:"center", fontSize:13, fontWeight:'700', color:T.text, marginBottom:4 }}>{Math.round(zoomState.scale*100)}%</div>
-              {/* ✅ Zoom In / Out now zoom around the CENTER of the canvas (offset is adjusted too) */}
+              {/* Zoom In / Out zoom around the CENTER of the canvas (offset is adjusted too) */}
               <button onClick={() => zoomFromCenter(1.2)} style={styles.zoomButton} title="Zoom In"><FaSearchPlus /></button>
               <button onClick={() => zoomFromCenter(0.8)} style={styles.zoomButton} title="Zoom Out"><FaSearchMinus /></button>
               <button onClick={() => {
@@ -5747,7 +5670,7 @@ export default function MapEditor() {
                 if (c) setZoomState(p => ({ ...p, scale:1, offsetX:(c.clientWidth - mapMsg.width)/2, offsetY:(c.clientHeight - mapMsg.height)/2 }));
               }} style={styles.zoomButton} title="Reset View"><FaExpand /></button>
 
-              {/* Rotation controls (moved here from the Tools tab, placed below Reset View) */}
+              {/* Rotation controls */}
               <button
                 onClick={() => {
                   const nextRotation = (rotationRef.current + 90) % 360;

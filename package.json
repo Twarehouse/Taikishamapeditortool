@@ -1,67 +1,49 @@
 {
   "name": "taikisha-map-editor-tool",
-
   "version": "1.0.0",
-
   "description": "Taikisha Map Editor: v.0.2",
-
   "author": "Sanket",
-
   "private": true,
-
   "main": "electron/main.js",
-
   "scripts": {
     "dev": "vite",
-
     "build": "vite build",
-
     "preview": "vite preview",
-
     "electron": "electron .",
-
     "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
-
     "dist": "npm run build && electron-builder"
   },
-
   "build": {
     "appId": "com.taikisha.mapeditor",
-
     "productName": "TaikishaMapEditor",
-
     "directories": {
       "output": "release"
     },
-
     "extraResources": [
-    {
-      "from": "backend",
-      "to": "backend"
-    }
-  ],
-
+      {
+        "from": "backend",
+        "to": "backend"
+      }
+    ],
     "files": [
       "dist/**/*",
       "electron/**/*",
       "package.json"
     ],
-
     "linux": {
       "target": [
         "AppImage"
       ],
-
       "category": "Development"
     }
   },
-
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/modifiers": "^9.0.0",
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
     "@hello-pangea/dnd": "^18.0.1",
+    "@tailwindcss/vite": "^4.3.3",
     "axios": "^1.13.2",
     "framer-motion": "^12.23.24",
     "js-yaml": "^4.1.1",
@@ -71,31 +53,24 @@
     "react-dom": "^18.2.0",
     "react-icons": "^5.5.0",
     "react-joystick-component": "^6.2.1",
-    "react-router-dom": "^6.14.1",
+    "react-router-dom": "^7.18.4",
     "recharts": "^3.4.1",
     "ros3d": "^0.17.0",
     "roslib": "^1.4.1",
     "socket.io-client": "^4.8.3",
+    "ssh2": "^1.17.0",
     "uuid": "^13.0.0"
   },
-
   "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
     "@vitejs/plugin-react": "^4.2.0",
-
     "autoprefixer": "^10.4.21",
-
     "concurrently": "^9.2.1",
-
     "electron": "^41.7.1",
-
     "electron-builder": "^26.0.12",
-
     "postcss": "^8.5.6",
-
-    "tailwindcss": "^3.3.3",
-
+    "tailwindcss": "^4.3.3",
     "vite": "^7.1.7",
-
     "wait-on": "^8.0.5"
   }
 }
