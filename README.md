@@ -1,4 +1,4 @@
-# Fleet Manager Dashboard
+# Map Editor Tool
 
 React + Vite + Tailwind project scaffold for a Fleet Manager dashboard.
 
