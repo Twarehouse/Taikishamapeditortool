@@ -2882,8 +2882,6 @@
 //   );
 // }
 
-
-
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import { useLanguage } from "../context/LanguageContext";
 import yaml from "js-yaml";
@@ -3221,6 +3219,38 @@ export default function MapEditor() {
         resolve();
       }, 150);
     });
+  };
+
+  // ✅ ZOOM FIX
+  // The canvas is drawn as: translate(offset) -> scale(scale). Changing only `scale`
+  // therefore scales everything around the top-left corner of the map, which is why the
+  // map "ran away" to a corner. To zoom around a fixed screen point (anchorX, anchorY)
+  // we must also move the offset so the map point under that anchor stays put:
+  //     offset' = anchor - (anchor - offset) * (newScale / oldScale)
+  // The anchor is expressed in the canvas' own (un-rotated) pixel space. The view
+  // rotation is applied around the canvas center, so the center is a fixed point of that
+  // rotation and zooming around the center is correct for every rotation angle.
+  const MIN_ZOOM = 0.1;
+  const MAX_ZOOM = 5;
+
+  const zoomAroundPoint = (factor, anchorX, anchorY) => {
+    setZoomState(p => {
+      const newScale = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, p.scale * factor));
+      if (newScale === p.scale) return p;
+      const k = newScale / p.scale;
+      return {
+        ...p,
+        scale: newScale,
+        offsetX: anchorX - (anchorX - p.offsetX) * k,
+        offsetY: anchorY - (anchorY - p.offsetY) * k,
+      };
+    });
+  };
+
+  const zoomFromCenter = (factor) => {
+    const container = canvasRef.current?.parentElement;
+    if (!container) return;
+    zoomAroundPoint(factor, container.clientWidth / 2, container.clientHeight / 2);
   };
 
   const rosToCanvasCoords = (rosX, rosY) => {
@@ -4951,10 +4981,84 @@ export default function MapEditor() {
     setCurrentSendType('json'); setRobotIp(""); setSendingStatus(""); setShowRobotIpModal(true);
   };
 
+  // ───────────────────────────────────────────────────────────────────────────
+  // SEND TO ROBOT OVER ROSBRIDGE (no Flask / SSH backend needed)
+  //
+  // Opens a short-lived rosbridge connection to ws://<robotIp>:9090, publishes the
+  // file as a JSON string on /map_editor/file_upload and waits for the robot's
+  // confirmation on /map_editor/file_upload_ack. A small ROS 2 node on the robot
+  // (map_editor_receiver.py) saves the file to ~/Desktop.
+  //
+  // The message is re-published once per second until the robot answers, because
+  // the first message can be lost while ROS 2 discovery connects the new
+  // rosbridge publisher to the receiver. The receiver just overwrites the file,
+  // so repeats are harmless.
+  // ───────────────────────────────────────────────────────────────────────────
+  const ROSBRIDGE_PORT = 9090;
+  const UPLOAD_TOPIC = "/map_editor/file_upload";
+  const UPLOAD_ACK_TOPIC = "/map_editor/file_upload_ack";
+
+  const sendFileViaRosbridge = (ip, filename, content, kind) => new Promise((resolve, reject) => {
+    if (!window.ROSLIB) { reject(new Error("ROSLIB is not loaded")); return; }
+
+    const url = `ws://${ip}:${ROSBRIDGE_PORT}`;
+    const requestId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const remote = new window.ROSLIB.Ros({ url });
+
+    let finished = false;
+    let connected = false;
+    let retryTimer = null;
+    let timeoutTimer = null;
+    let ackTopic = null;
+
+    const finish = (err, result) => {
+      if (finished) return;
+      finished = true;
+      clearInterval(retryTimer);
+      clearTimeout(timeoutTimer);
+      try { if (ackTopic) ackTopic.unsubscribe(); } catch (_) {}
+      try { remote.close(); } catch (_) {}
+      if (err) reject(err); else resolve(result);
+    };
+
+    timeoutTimer = setTimeout(() => {
+      finish(new Error(
+        connected
+          ? "Connected to rosbridge, but the robot did not confirm. Is map_editor_receiver.py running on the robot?"
+          : `Cannot reach rosbridge at ${url}. Check the IP and that rosbridge is running.`
+      ));
+    }, 10000);
+
+    remote.on("error", () => finish(new Error(`Cannot reach rosbridge at ${url}. Check the IP and that rosbridge is running.`)));
+    remote.on("close", () => finish(new Error(`Connection to ${url} closed before the robot confirmed.`)));
+
+    remote.on("connection", () => {
+      connected = true;
+
+      ackTopic = new window.ROSLIB.Topic({ ros: remote, name: UPLOAD_ACK_TOPIC, messageType: "std_msgs/String" });
+      ackTopic.subscribe((msg) => {
+        let reply;
+        try { reply = JSON.parse(msg.data); } catch (_) { return; }
+        if (reply.request_id !== requestId) return;
+        if (reply.ok) finish(null, reply);
+        else finish(new Error(reply.error || "The robot could not save the file"));
+      });
+
+      const uploadTopic = new window.ROSLIB.Topic({ ros: remote, name: UPLOAD_TOPIC, messageType: "std_msgs/String" });
+      const payload = new window.ROSLIB.Message({
+        data: JSON.stringify({ request_id: requestId, filename, kind, content })
+      });
+      const publish = () => { if (!finished) uploadTopic.publish(payload); };
+      publish();
+      retryTimer = setInterval(publish, 1000);
+    });
+  });
+
   const executeSendToRobot = async () => {
     if (!robotIp.trim()) { setSendingStatus("Please enter robot IP address"); return; }
+    const ip = robotIp.trim();
     const ipPattern = /^(\d{1,3}\.){3}\d{1,3}$/;
-    if (!ipPattern.test(robotIp)) { setSendingStatus("Please enter a valid IP address"); return; }
+    if (!ipPattern.test(ip)) { setSendingStatus("Please enter a valid IP address"); return; }
     if (currentSendType === 'yaml') setIsSavingYAML(true); else setIsSavingJSON(true);
     setDbStatus("Sending..."); setSendingStatus("Sending...");
     try {
@@ -4964,23 +5068,28 @@ export default function MapEditor() {
       let reverseNodes = reverseArrows.length > 0 ? getOrderedNodesFromArrows(reverseArrows, nodes) : [];
       const forwardWPs = forwardNodes.length > 0 ? buildWaypointsArray(buildNodesWithYaw(forwardNodes, forwardArrows), "forward") : [];
       let reverseWPs = reverseNodes.length > 0 ? buildWaypointsArray(buildNodesWithYaw(reverseNodes, reverseArrows), "reverse") : [];
-      
-      const formData = new FormData();
-      formData.append('mapName', mapName); formData.append('robotIp', robotIp);
+
+      // Map names like "map/map" would be read as a folder path, so make them filename-safe.
+      const safeName = mapName.replace(/[^A-Za-z0-9._-]+/g, "_");
+
+      let filename, content, count;
       if (currentSendType === 'yaml') {
-        const yamlContent = buildYAMLString(forwardWPs, reverseWPs);
-        formData.append('yaml', new Blob([yamlContent], { type: 'text/yaml' }), `${mapName}.yaml`);
-        const response = await fetch('http://localhost:5000/send-yaml-to-robot', { method: 'POST', body: formData });
-        if (!response.ok) { const err = await response.json(); throw new Error(err.error || 'Failed'); }
-        setDbStatus("Sent!"); setSendingStatus("✅ Sent successfully!");
-        setTimeout(() => { setShowRobotIpModal(false); showAlert(`YAML sent to robot at ${robotIp}!\n📍 ${forwardWPs.length + reverseWPs.length} waypoints sent!`, 'success'); }, 1000);
+        filename = `${safeName}_waypoints.yaml`;
+        content = buildYAMLString(forwardWPs, reverseWPs);
+        count = forwardWPs.length + reverseWPs.length;
       } else {
-        formData.append('json', new Blob([JSON.stringify({ waypoints: forwardWPs, total_nodes: forwardWPs.length }, null, 2)], { type: 'application/json' }), `${mapName}_waypoints.json`);
-        const response = await fetch('http://localhost:5000/send-json-to-robot', { method: 'POST', body: formData });
-        if (!response.ok) { const err = await response.json(); throw new Error(err.error || 'Failed'); }
-        setDbStatus("Sent!"); setSendingStatus("✅ Sent successfully!");
-        setTimeout(() => { setShowRobotIpModal(false); showAlert(`JSON sent to robot at ${robotIp}!\n📍 ${forwardWPs.length} waypoints sent!`, 'success'); }, 1000);
+        filename = `${safeName}_waypoints.json`;
+        content = JSON.stringify({ waypoints: forwardWPs, total_nodes: forwardWPs.length }, null, 2);
+        count = forwardWPs.length;
       }
+
+      const result = await sendFileViaRosbridge(ip, filename, content, currentSendType);
+
+      setDbStatus("Sent!"); setSendingStatus("✅ Sent successfully!");
+      setTimeout(() => {
+        setShowRobotIpModal(false);
+        showAlert(`${currentSendType.toUpperCase()} sent to robot at ${ip}!\n📍 ${count} waypoints sent\n📁 Saved as ${result.path || filename}`, 'success');
+      }, 1000);
     } catch (e) { console.error(e); setDbStatus("Failed!"); setSendingStatus(`❌ Failed: ${e.message}`); }
     finally { setIsSavingYAML(false); setIsSavingJSON(false); }
   };
@@ -5409,7 +5518,7 @@ export default function MapEditor() {
         <div style={{ marginBottom:20 }}>
           <label style={styles.label}>Robot IP Address</label>
           <input type="text" value={robotIp} onChange={e => setRobotIp(e.target.value)} placeholder="e.g., 192.168.1.100" style={styles.input} autoFocus />
-          <p style={styles.hint}>Enter the IP address of the robot</p>
+          <p style={styles.hint}>IP of the robot where rosbridge is running (port 9090). The file is saved to the robot's Desktop.</p>
         </div>
         {sendingStatus && (
           <div style={{ padding:'10px', borderRadius:8, marginBottom:20, background: sendingStatus.includes('✅') ? '#10b981' : sendingStatus.includes('❌') ? '#ef4444' : '#3b82f6', color:'white', fontSize:'14px', textAlign:'center' }}>
@@ -5629,8 +5738,9 @@ export default function MapEditor() {
           <div style={styles.canvasContainer}>
             <div style={styles.zoomControls}>
               <div style={{ textAlign:"center", fontSize:13, fontWeight:'700', color:T.text, marginBottom:4 }}>{Math.round(zoomState.scale*100)}%</div>
-              <button onClick={() => setZoomState(p => ({ ...p, scale: Math.min(5, p.scale*1.2) }))} style={styles.zoomButton} title="Zoom In"><FaSearchPlus /></button>
-              <button onClick={() => setZoomState(p => ({ ...p, scale: Math.max(0.1, p.scale*0.8) }))} style={styles.zoomButton} title="Zoom Out"><FaSearchMinus /></button>
+              {/* ✅ Zoom In / Out now zoom around the CENTER of the canvas (offset is adjusted too) */}
+              <button onClick={() => zoomFromCenter(1.2)} style={styles.zoomButton} title="Zoom In"><FaSearchPlus /></button>
+              <button onClick={() => zoomFromCenter(0.8)} style={styles.zoomButton} title="Zoom Out"><FaSearchMinus /></button>
               <button onClick={() => {
                 if (!mapMsg || !canvasRef.current) return;
                 const c = canvasRef.current.parentElement;
