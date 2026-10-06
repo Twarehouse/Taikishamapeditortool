@@ -87,6 +87,9 @@ The left sidebar has four tabs.
 
 **Arrow direction:** Forward (orange) or Reverse (red). Forward arrows become the forward mission and reverse arrows the reverse mission.
 
+**Arrow selection:** Select single direction or multi-direction arrow.
+
+
 ### Curved paths
 
 1. Set the node type to **Waypoint For Corner** and place corner nodes.
