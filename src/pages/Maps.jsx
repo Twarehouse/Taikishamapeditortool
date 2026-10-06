@@ -3082,6 +3082,10 @@ export default function MapEditor() {
   const [zones, setZones] = useState([]);
   const [currentZonePoints, setCurrentZonePoints] = useState([]);
   const [arrowDirection, setArrowDirection] = useState("forward");
+  // NEW: "single" = normal one-way arrow, "multi" = multi-direction (two-way) arrow.
+  // With "multi", click one node and then another and a two-way arrow is created
+  // between them, exactly like a normal arrow is created.
+  const [arrowMode, setArrowMode] = useState("single");
   const [arrowDrawing, setArrowDrawing] = useState({ isDrawing: false, fromId: null, points: [] });
 
   // Edit State
@@ -3210,6 +3214,7 @@ export default function MapEditor() {
     zoomButton: { padding: 8, borderRadius: 6, border: "none", background: T.accent, color: "#fff", cursor: "pointer", display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.2s ease' },
     yawTooltip: { position: "absolute", top: 50, right: 12, zIndex: 21, background: T.card, padding: 12, borderRadius: 8, border: `1px solid ${T.border}`, boxShadow: "0 4px 12px rgba(0,0,0,0.15)", maxWidth: 300 },
     toolGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 },
+    arrowModeBar: { position: "absolute", top: 12, left: 12, zIndex: 20, display: "flex", flexDirection: "column", gap: 6, background: T.card, padding: 8, borderRadius: 10, boxShadow: "0 6px 18px rgba(0,0,0,0.15)", border: `1px solid ${T.border}` },
   };
 
   const downloadFile = (blob, filename) => {
@@ -3393,6 +3398,69 @@ export default function MapEditor() {
     ctx.stroke();
   };
 
+  // Draws one filled arrowhead whose tip is at (tipX, tipY), pointing away from (fromX, fromY).
+  const drawArrowHeadAt = (ctx, tipX, tipY, fromX, fromY, hl, color) => {
+    const angle = Math.atan2(tipY - fromY, tipX - fromX);
+    ctx.beginPath();
+    ctx.moveTo(tipX, tipY);
+    ctx.lineTo(tipX - hl * Math.cos(angle - Math.PI / 6), tipY - hl * Math.sin(angle - Math.PI / 6));
+    ctx.lineTo(tipX - hl * Math.cos(angle + Math.PI / 6), tipY - hl * Math.sin(angle + Math.PI / 6));
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.fill();
+  };
+
+  // Draws the arrowhead at the END of the arrow and, for multi-direction (bidirectional)
+  // arrows, a second arrowhead at the START. Heads follow the curve tangent when the
+  // end segment is curved.
+  const drawArrowHeads = (ctx, ap, bends, curveAllSegments, bidirectional, color, hl) => {
+    if (!ap || ap.length < 2) return;
+    const n = ap.length;
+
+    // End head
+    const last = ap[n - 1], secLast = ap[n - 2];
+    let endFromX = secLast.canvasX, endFromY = secLast.canvasY;
+    if (curveAllSegments || (secLast.isCorner && last.isCorner)) {
+      const c = getSegmentControlPoint(secLast, last, n - 2, bends);
+      endFromX = c.x; endFromY = c.y;
+    }
+    drawArrowHeadAt(ctx, last.canvasX, last.canvasY, endFromX, endFromY, hl, color);
+
+    // Start head (only for multi-direction arrows)
+    if (bidirectional) {
+      const first = ap[0], second = ap[1];
+      let startFromX = second.canvasX, startFromY = second.canvasY;
+      if (curveAllSegments || (first.isCorner && second.isCorner)) {
+        const c = getSegmentControlPoint(first, second, 0, bends);
+        startFromX = c.x; startFromY = c.y;
+      }
+      drawArrowHeadAt(ctx, first.canvasX, first.canvasY, startFromX, startFromY, hl, color);
+    }
+  };
+
+  // Splits the arrow list into the arrows that make the FORWARD path and the arrows that
+  // make the REVERSE path.
+  //  - forward: every arrow that is not an explicit "reverse" arrow (this includes
+  //    multi-direction arrows, which are stored with direction "forward").
+  //  - reverse: explicit "reverse" arrows, PLUS every multi-direction arrow flipped
+  //    (from/to swapped) because a two-way arrow can also be driven backwards.
+  const splitArrowsByDirection = (arrowList) => {
+    const forwardArrows = arrowList.filter(a => a.direction !== "reverse");
+    const flippedBidirectional = arrowList
+      .filter(a => a.bidirectional === true && a.direction !== "reverse")
+      .map(a => ({
+        ...a,
+        fromId: a.toId,
+        toId: a.fromId,
+        points: [...(a.points || [])].reverse()
+      }));
+    const reverseArrows = [
+      ...arrowList.filter(a => a.direction === "reverse"),
+      ...flippedBidirectional
+    ];
+    return { forwardArrows, reverseArrows };
+  };
+
   // Walks the arrow graph to produce an ordered node sequence for export.
   //
   // Finds every disconnected chain/loop in the arrow graph and concatenates ALL of them,
@@ -3541,8 +3609,7 @@ export default function MapEditor() {
     }
 
     try {
-      const forwardArrows = arrows.filter(a => a.direction !== "reverse");
-      const reverseArrows = arrows.filter(a => a.direction === "reverse");
+      const { forwardArrows, reverseArrows } = splitArrowsByDirection(arrows);
 
       let forwardNodes = forwardArrows.length > 0
         ? getOrderedNodesFromArrows(forwardArrows, nodes)
@@ -3667,6 +3734,25 @@ export default function MapEditor() {
     historyIndexRef.current = 0;
     setHistory([entry]);
     setHistoryIndex(0);
+  };
+
+  // FIX (undo/redo for crop & noise erase):
+  // Any history entry that has no map data (e.g. the initial one, or one created before the
+  // map was loaded from ROS) gets the CURRENT map filled in. Call this BEFORE the map is
+  // modified, so the baseline is the pre-edit map and Undo can restore it. Without this,
+  // undoing a crop went back to an entry with editableMapData === null, which
+  // applyHistorySnapshot ignores, so the crop was never reverted.
+  const ensureMapBaseline = () => {
+    const map = editableMapRef.current;
+    if (!map || !map.data) return;
+    const hist = historyRef.current;
+    if (!hist.some(h => h.editableMapData == null)) return;
+    const base = Array.from(map.data);
+    const patched = hist.map(h =>
+      h.editableMapData == null ? { ...h, editableMapData: base } : h
+    );
+    historyRef.current = patched;
+    setHistory(patched);
   };
 
   // Backward-compatible alias for older call sites; new editing operations
@@ -3931,6 +4017,7 @@ export default function MapEditor() {
         const dx = toNode.canvasX - canvasX, dy = toNode.canvasY - canvasY;
         if (Math.sqrt(dx*dx + dy*dy) <= 12 / zoomState.scale) {
           const nextArrows = currentArrows.filter(a => a.id !== arrow.id);
+          arrowsRef.current = nextArrows;
           setArrows(nextArrows);
           recordHistoryState({ arrows: nextArrows });
           return;
@@ -3945,6 +4032,7 @@ export default function MapEditor() {
           const yy = param < 0 ? p1.canvasY : param > 1 ? p2.canvasY : p1.canvasY + param*D;
           if (Math.sqrt((canvasX-xx)**2 + (canvasY-yy)**2) <= 6/zoomState.scale) {
             const nextArrows = currentArrows.filter(a => a.id !== arrow.id);
+            arrowsRef.current = nextArrows;
             setArrows(nextArrows);
             recordHistoryState({ arrows: nextArrows });
             return;
@@ -3956,6 +4044,7 @@ export default function MapEditor() {
     for (const z of currentZones) {
       if (pointInPolygon([canvasX, canvasY], z.points.map(p => [p.canvasX, p.canvasY]))) {
         const nextZones = currentZones.filter(pz => pz.id !== z.id);
+        zonesRef.current = nextZones;
         setZones(nextZones);
         recordHistoryState({ zones: nextZones });
         return;
@@ -3967,6 +4056,8 @@ export default function MapEditor() {
     const currentMap = editableMapRef.current;
     const currentMapMsg = mapMsgRef.current;
     if (!currentMap || !canvasRef.current) return;
+
+    ensureMapBaseline(); // FIX: make sure Undo can restore the pre-erase map
 
     const canvasCoords = clientToCanvasCoords(clientX, clientY);
     const mapX = Math.floor(canvasCoords.x);
@@ -4001,6 +4092,7 @@ export default function MapEditor() {
 
   const startHandErase = (clientX, clientY) => {
     if (!editableMap || !canvasRef.current) return;
+    ensureMapBaseline(); // FIX: make sure Undo can restore the pre-erase map
     const canvasCoords = clientToCanvasCoords(clientX, clientY);
     const mapX = Math.floor(canvasCoords.x), mapY = Math.floor(editableMap.height - canvasCoords.y);
     const { width, height } = editableMap;
@@ -4090,6 +4182,11 @@ export default function MapEditor() {
   const handleApplyCrop = async () => {
     if (!mapMsg || !mapParamsRef.current) { await showAlert("No map loaded!", 'error'); return; }
     if (!cropState.freehandPoints || cropState.freehandPoints.length < 3) { await showAlert("Draw a closed freehand shape first!", 'warning'); return; }
+
+    // FIX: snapshot the un-cropped map into the history baseline BEFORE modifying it,
+    // so Undo can bring the original map back.
+    ensureMapBaseline();
+
     const { width, height } = mapParamsRef.current;
     const mapPolygon = cropState.freehandPoints.map(p => ({ x: p.x, y: height - 1 - p.y }));
     const newData = new Int8Array([...mapMsg.data]);
@@ -4101,8 +4198,15 @@ export default function MapEditor() {
         else { newData[idx] = -3; deletedPixels++; }
       }
     }
-    setMapMsg(prev => prev ? { ...prev, data: newData } : null);
-    setEditableMap(prev => prev ? { ...prev, data: [...newData] } : null);
+
+    // FIX: update the refs immediately so recordHistoryState / later undo logic see the new map
+    const nextMsg = { ...mapMsg, data: newData };
+    const nextEditable = { ...(editableMapRef.current || mapMsg), data: Array.from(newData) };
+    mapMsgRef.current = nextMsg;
+    editableMapRef.current = nextEditable;
+    setMapMsg(nextMsg);
+    setEditableMap(nextEditable);
+
     recordHistoryState({ editableMapData: newData });
     setCropState({ isCropping: false, startX: 0, startY: 0, endX: 0, endY: 0, isDragging: false, freehandPoints: [] });
     setTool("pan");
@@ -4128,9 +4232,13 @@ export default function MapEditor() {
       if (!pgmEntry) { await showAlert("Could not find PGM file in ZIP", 'error'); return; }
       const pgmBuf = await pgmEntry.async('arraybuffer');
       await loadMapFromPGM(pgmBuf, parsedYaml, yamlFiles[0].replace(/\.(yaml|yml)$/, ''));
+      nodesRef.current = []; arrowsRef.current = []; zonesRef.current = []; rotationRef.current = 0;
       setNodes([]); setArrows([]); setZones([]); setCurrentZonePoints([]);
       setArrowDrawing({ isDrawing: false, fromId: null, points: [] });
-      setRotation(0); clearHistory(); idCounter.current = 1;
+      setRotation(0);
+      // FIX: do NOT call clearHistory() here — it would wipe the map baseline that
+      // loadMapFromPGM just stored in the history.
+      idCounter.current = 1;
     } catch (err) {
       console.error(err);
       await showAlert("Failed to process ZIP.", 'error');
@@ -4158,8 +4266,22 @@ export default function MapEditor() {
       }
       const loadedMap = { width, height, resolution: yamlConfig.resolution || 0.05, data: occupancyData, origin: { x: yamlConfig.origin?.[0] || 0, y: yamlConfig.origin?.[1] || 0, z: 0 } };
       mapParamsRef.current = { width, height, resolution: yamlConfig.resolution || 0.05, originX: yamlConfig.origin?.[0] || 0, originY: yamlConfig.origin?.[1] || 0 };
+      const loadedEditable = { ...loadedMap, data: [...occupancyData] };
+
+      // FIX: update refs immediately (the ref-sync effects only run after the next render),
+      // so history helpers called right after loading see the freshly loaded map.
+      mapMsgRef.current = loadedMap;
+      editableMapRef.current = loadedEditable;
+
       setMapMsg(loadedMap);
-      setEditableMap({ ...loadedMap, data: [...occupancyData] });
+      setEditableMap(loadedEditable);
+
+      // FIX: start the history with the freshly loaded map as the baseline snapshot.
+      resetHistoryToCurrent({
+        nodes: [], arrows: [], zones: [], rotation: 0,
+        editableMapData: occupancyData
+      });
+
       setCanvasInitialized(true); toolInitializedRef.current = false; setMapLoaderActive(false);
       if (mapNameFromFile && !mapName) setMapName(mapNameFromFile);
       if (canvasRef.current) {
@@ -4203,11 +4325,23 @@ export default function MapEditor() {
         originY: msg.info.origin.position.y,
       };
 
-      setMapMsg(mapData);
-      setEditableMap({
+      const editable = {
         ...mapData,
         data: [...msg.data],
+      };
+
+      mapMsgRef.current = mapData;
+      editableMapRef.current = editable;
+
+      setMapMsg(mapData);
+      setEditableMap(editable);
+
+      // FIX: baseline history snapshot includes the live map so crop/erase can be undone.
+      resetHistoryToCurrent({
+        nodes: [], arrows: [], zones: [], rotation: 0,
+        editableMapData: editable.data
       });
+
       setCanvasInitialized(true);
       toolInitializedRef.current = false;
 
@@ -4345,7 +4479,7 @@ export default function MapEditor() {
         rotation,
         timestamp: Date.now(),
         nodes: nodes.map(n => ({ id: n.id, type: n.type, label: n.label, rosX: n.rosX, rosY: n.rosY, yaw: n.yaw || 0, speed: n.speed })),
-        arrows: arrows.map(a => ({ id: a.id, fromId: a.fromId, toId: a.toId, points: a.points || [], direction: a.direction, curved: a.curved === true, bends: a.bends || {} })),
+        arrows: arrows.map(a => ({ id: a.id, fromId: a.fromId, toId: a.toId, points: a.points || [], direction: a.direction, bidirectional: a.bidirectional === true, curved: a.curved === true, bends: a.bends || {} })),
         zones: zones.map(z => ({ id: z.id, name: z.name, type: z.type, points: z.points.map(p => ({ rosX: p.rosX, rosY: p.rosY, canvasX: p.canvasX, canvasY: p.canvasY })) }))
       };
 
@@ -4380,13 +4514,15 @@ export default function MapEditor() {
       if (dataFiles.length > 0) {
         const mapData = JSON.parse(await zipData.files[dataFiles[0]].async('text'));
         const loadedNodes = mapData.nodes.map(node => { const canvas = rosToCanvasCoords(node.rosX, node.rosY); return { ...node, canvasX: canvas.x, canvasY: canvas.y }; });
-        const loadedArrows = mapData.arrows.map(arrow => ({ ...arrow, points: arrow.points || [], curved: arrow.curved === true, bends: arrow.bends || {} }));
+        const loadedArrows = mapData.arrows.map(arrow => ({ ...arrow, points: arrow.points || [], bidirectional: arrow.bidirectional === true, curved: arrow.curved === true, bends: arrow.bends || {} }));
         const loadedZones = mapData.zones.map(zone => ({ ...zone, points: zone.points.map(p => ({ ...p })) }));
+        nodesRef.current = loadedNodes; arrowsRef.current = loadedArrows; zonesRef.current = loadedZones;
         setNodes(loadedNodes); setArrows(loadedArrows); setZones(loadedZones);
-        if (mapData.rotation !== undefined) setRotation(mapData.rotation);
+        if (mapData.rotation !== undefined) { rotationRef.current = mapData.rotation; setRotation(mapData.rotation); }
         if (mapData.mapName) setMapName(mapData.mapName);
         const allIds = [...loadedNodes, ...loadedArrows, ...loadedZones];
         idCounter.current = allIds.reduce((max, item) => Math.max(max, parseInt(item.id?.split('_')[1]) || 0), 0) + 1;
+        // editableMapRef was set synchronously by loadMapFromPGM, so the map is included here.
         resetHistoryToCurrent({ nodes: loadedNodes, arrows: loadedArrows, zones: loadedZones, rotation: mapData.rotation !== undefined ? mapData.rotation : 0 });
         const speedCount = loadedNodes.filter(n => n.speed !== undefined && n.speed !== null).length;
         await showAlert(`Complete map loaded!\n📍 ${loadedNodes.length} nodes, ${loadedArrows.length} arrows, ${loadedZones.length} zones restored!\n⚡ ${speedCount} nodes have custom speeds`, 'success');
@@ -4514,6 +4650,7 @@ export default function MapEditor() {
           ? data.arrows.map(arrow => ({
               ...arrow,
               points: arrow.points || [],
+              bidirectional: arrow.bidirectional === true,
               curved: arrow.curved === true,
               bends: arrow.bends || {}
             }))
@@ -4522,6 +4659,7 @@ export default function MapEditor() {
         setArrows(importedArrows);
 
         // JSON import is one atomic history action.
+        ensureMapBaseline();
         recordHistoryState({
           nodes: validNodes,
           arrows: importedArrows,
@@ -4603,6 +4741,7 @@ export default function MapEditor() {
     };
 
     const nextNodes = [...nodesRef.current, newNode];
+    nodesRef.current = nextNodes;
     setNodes(nextNodes);
     recordHistoryState({ nodes: nextNodes });
   };
@@ -4699,7 +4838,8 @@ export default function MapEditor() {
   // of short segments traces that curve instead of cutting straight across it.
   // `accNewNodes` accumulates every node created so far in the current finish operation,
   // so labels stay unique even when one arrow-drawing pass fills in several segments.
-  const buildWaypointChainBetween = (fromPt, toPt, direction, accNewNodes) => {
+  // `bidirectional` marks every generated arrow as a multi-direction (two-way) arrow.
+  const buildWaypointChainBetween = (fromPt, toPt, direction, accNewNodes, bidirectional = false) => {
     const dx = toPt.rosX - fromPt.rosX;
     const dy = toPt.rosY - fromPt.rosY;
     const dist = Math.hypot(dx, dy);
@@ -4794,6 +4934,7 @@ export default function MapEditor() {
           toId: wpNode.id,
           points: [],
           direction,
+          bidirectional,
           curved: true,
           bends: { 0: bend }
         });
@@ -4807,6 +4948,7 @@ export default function MapEditor() {
           toId: toPt.id,
           points: [],
           direction,
+          bidirectional,
           curved: true,
           bends: { 0: bend }
         });
@@ -4823,9 +4965,17 @@ export default function MapEditor() {
   // corner stay as plain direct arrows.
   // `extraNodesToAdd` lets the caller fold in a brand-new endpoint node so everything
   // lands in a single history step.
+  //
+  // Arrow type: when `arrowMode` is "multi" every created arrow is flagged
+  // `bidirectional: true` (drawn with an arrowhead on BOTH ends, and exported in both the
+  // forward and reverse paths). In "single" mode arrows behave exactly as before.
   const finishArrowAt = (toNode, viaPoints, extraNodesToAdd = []) => {
     const fromNode = nodesRef.current.find(n => n.id === arrowDrawing.fromId);
     if (!fromNode) { setArrowDrawing({ isDrawing: false, fromId: null, points: [] }); return; }
+
+    const isMulti = arrowMode === "multi";
+    // A multi-direction arrow is stored as a "forward" arrow with bidirectional=true.
+    const storedDirection = isMulti ? "forward" : arrowDirection;
 
     const sequence = [
       { id: fromNode.id, rosX: fromNode.rosX, rosY: fromNode.rosY, canvasX: fromNode.canvasX, canvasY: fromNode.canvasY, isCorner: fromNode.type === "waypointforcorner" },
@@ -4839,15 +4989,17 @@ export default function MapEditor() {
     for (let i = 0; i < sequence.length - 1; i++) {
       const a = sequence[i], b = sequence[i + 1];
       if (a.isCorner && b.isCorner) {
-        const { newArrows } = buildWaypointChainBetween(a, b, arrowDirection, accNewNodes);
+        const { newArrows } = buildWaypointChainBetween(a, b, storedDirection, accNewNodes, isMulti);
         allNewArrows.push(...newArrows);
       } else {
-        allNewArrows.push({ id: makeId("arrow"), fromId: a.id, toId: b.id, points: [], direction: arrowDirection });
+        allNewArrows.push({ id: makeId("arrow"), fromId: a.id, toId: b.id, points: [], direction: storedDirection, bidirectional: isMulti });
       }
     }
 
     const nextNodes = accNewNodes.length ? [...nodesRef.current, ...accNewNodes] : nodesRef.current;
     const nextArrows = [...arrowsRef.current, ...allNewArrows];
+    nodesRef.current = nextNodes;
+    arrowsRef.current = nextArrows;
     if (accNewNodes.length) setNodes(nextNodes);
     setArrows(nextArrows);
     recordHistoryState({ nodes: nextNodes, arrows: nextArrows });
@@ -4926,6 +5078,7 @@ export default function MapEditor() {
   const finishZone = () => {
     if (!currentZonePoints.length) return;
     const nextZones = [...zonesRef.current, { id: makeId("zone"), name: zoneName || `Zone_${zonesRef.current.length + 1}`, type: zoneType, points: currentZonePoints.slice() }];
+    zonesRef.current = nextZones;
     setZones(nextZones);
     recordHistoryState({ zones: nextZones });
     setCurrentZonePoints([]); setZoneName(""); setZoneType("normal");
@@ -4966,8 +5119,7 @@ export default function MapEditor() {
     if (currentSendType === 'yaml') setIsSavingYAML(true); else setIsSavingJSON(true);
     setDbStatus("Sending..."); setSendingStatus("Connecting over SSH...");
     try {
-      const forwardArrows = arrows.filter(a => a.direction !== "reverse");
-      const reverseArrows = arrows.filter(a => a.direction === "reverse");
+      const { forwardArrows, reverseArrows } = splitArrowsByDirection(arrows);
       const forwardNodes = forwardArrows.length > 0 ? getOrderedNodesFromArrows(forwardArrows, nodes) : nodes;
       const reverseNodes = reverseArrows.length > 0 ? getOrderedNodesFromArrows(reverseArrows, nodes) : [];
       const forwardWPs = forwardNodes.length > 0 ? buildWaypointsArray(buildNodesWithYaw(forwardNodes, forwardArrows), "forward") : [];
@@ -5013,6 +5165,7 @@ export default function MapEditor() {
   const handleClearAll = async () => {
     const ok = await showConfirm("Clear ALL nodes, arrows, and zones?", 'warning');
     if (!ok) return;
+    ensureMapBaseline();
     nodesRef.current = [];
     arrowsRef.current = [];
     zonesRef.current = [];
@@ -5027,6 +5180,8 @@ export default function MapEditor() {
     if (!ok) return;
     localStorage.removeItem("mapEditorWorkspace");
     idCounter.current = 1;
+    nodesRef.current = []; arrowsRef.current = []; zonesRef.current = [];
+    mapMsgRef.current = null; editableMapRef.current = null; rotationRef.current = 0;
     setMapMsg(null); setEditableMap(null); setNodes([]); setArrows([]); setZones([]);
     setCurrentZonePoints([]); setArrowDrawing({ isDrawing: false, fromId: null, points: [] });
     setMapName(""); setCanvasInitialized(false); setRotation(0);
@@ -5049,6 +5204,12 @@ export default function MapEditor() {
     offCanvas.width = width; offCanvas.height = height;
     offCanvas.getContext("2d").putImageData(imgData, 0, 0);
     ctx.drawImage(offCanvas, 0, 0, width, height);
+  };
+
+  // Colour of an arrow: reverse = red, multi-direction = purple, normal forward = orange.
+  const getArrowColor = (a) => {
+    if (a.bidirectional === true) return "#a855f7";
+    return a.direction === "reverse" ? "#ef4444" : "#f97316";
   };
 
   const drawAnnotations = (ctx, SF) => {
@@ -5074,29 +5235,12 @@ export default function MapEditor() {
         { ...to, isCorner: to.type === "waypointforcorner" }
       ];
       if (ap.length < 2) return;
-      const color = a.direction === "reverse" ? "#ef4444" : "#f97316";
+      const color = getArrowColor(a);
       const bends = a.bends || {};
       const curveAllSegments = a.curved === true || (Object.keys(bends).length > 0 && ap.length === 2);
       ctx.strokeStyle = color; ctx.lineWidth = Math.max(1, 3/SF);
       drawSmoothArrowPath(ctx, ap, bends, curveAllSegments);
-      const last = ap[ap.length-1], secLast = ap[ap.length-2];
-      if (last && secLast) {
-        let tangentX = last.canvasX - secLast.canvasX;
-        let tangentY = last.canvasY - secLast.canvasY;
-
-        if (curveAllSegments) {
-          const lastIndex = ap.length - 2;
-          const lastCtrl = getSegmentControlPoint(secLast, last, lastIndex, bends);
-          tangentX = last.canvasX - lastCtrl.x;
-          tangentY = last.canvasY - lastCtrl.y;
-        }
-
-        const angle = Math.atan2(tangentY, tangentX), hl = Math.max(6, 12/SF);
-        ctx.beginPath(); ctx.moveTo(last.canvasX, last.canvasY);
-        ctx.lineTo(last.canvasX - hl*Math.cos(angle-Math.PI/6), last.canvasY - hl*Math.sin(angle-Math.PI/6));
-        ctx.lineTo(last.canvasX - hl*Math.cos(angle+Math.PI/6), last.canvasY - hl*Math.sin(angle+Math.PI/6));
-        ctx.closePath(); ctx.fillStyle = color; ctx.fill();
-      }
+      drawArrowHeads(ctx, ap, bends, curveAllSegments, a.bidirectional === true, color, Math.max(6, 12/SF));
     });
     nodes.forEach(n => {
       const radius = Math.max(2, 6/SF);
@@ -5320,19 +5464,12 @@ export default function MapEditor() {
         { ...to, isCorner: to.type === "waypointforcorner" }
       ];
       if (ap.length < 2) return;
-      const color = a.direction === "reverse" ? "#ef4444" : "#f97316";
+      const color = getArrowColor(a);
       const bends = a.bends || {};
       const curveAllSegments = a.curved === true || (Object.keys(bends).length > 0 && ap.length === 2);
       ctx.strokeStyle = color; ctx.lineWidth = Math.max(1, 2/zoomState.scale);
       drawSmoothArrowPath(ctx, ap, bends, curveAllSegments);
-      const last = ap[ap.length-1], secLast = ap[ap.length-2];
-      if (last && secLast) {
-        const angle = Math.atan2(last.canvasY-secLast.canvasY, last.canvasX-secLast.canvasX), hl = Math.max(6, 12/zoomState.scale);
-        ctx.beginPath(); ctx.moveTo(last.canvasX, last.canvasY);
-        ctx.lineTo(last.canvasX-hl*Math.cos(angle-Math.PI/6), last.canvasY-hl*Math.sin(angle-Math.PI/6));
-        ctx.lineTo(last.canvasX-hl*Math.cos(angle+Math.PI/6), last.canvasY-hl*Math.sin(angle+Math.PI/6));
-        ctx.closePath(); ctx.fillStyle = color; ctx.fill();
-      }
+      drawArrowHeads(ctx, ap, bends, curveAllSegments, a.bidirectional === true, color, Math.max(6, 12/zoomState.scale));
 
       // Direct-drag feedback: re-stroke just the curved segment the user is hovering or
       // dragging with a bright, thicker overlay so it's clear the whole line is grabbable.
@@ -5366,7 +5503,9 @@ export default function MapEditor() {
           { ...cursorCoords, isCorner: false }
         ];
         if (allPoints.length >= 2) {
-          ctx.strokeStyle = "rgba(255,165,0,0.8)"; ctx.lineWidth = Math.max(1, 2/zoomState.scale);
+          // Preview colour matches the arrow type being drawn (purple for multi-direction).
+          ctx.strokeStyle = arrowMode === "multi" ? "rgba(168,85,247,0.85)" : "rgba(255,165,0,0.8)";
+          ctx.lineWidth = Math.max(1, 2/zoomState.scale);
           drawSmoothArrowPath(ctx, allPoints, {}, false);
         }
       }
@@ -5398,7 +5537,7 @@ export default function MapEditor() {
       ctx.moveTo(0, cursorCoords.canvasY); ctx.lineTo(width, cursorCoords.canvasY); ctx.stroke();
     }
     ctx.restore();
-  }, [mapMsg, editableMap, zoomState, nodes, arrows, zones, currentZonePoints, cursorCoords, T, rotation, arrowDrawing, cropState, zoneType, tool, canvasInitialized, draggingNodeId, hoveredNodeId, draggingArrowInfo, hoveredArrowControl, canvasSize]);
+  }, [mapMsg, editableMap, zoomState, nodes, arrows, zones, currentZonePoints, cursorCoords, T, rotation, arrowDrawing, cropState, zoneType, tool, canvasInitialized, draggingNodeId, hoveredNodeId, draggingArrowInfo, hoveredArrowControl, canvasSize, arrowMode]);
 
   // Modals below are plain render functions (called as {renderX()}), NOT nested
   // components. A component defined inside MapEditor gets a new identity on every render,
@@ -5469,6 +5608,18 @@ export default function MapEditor() {
     if (tool === "connect") return "crosshair";
     if (tool === "zone") return "crosshair";
     return "default";
+  };
+
+  // Single / Multi direction selector. Shown in the Tools tab AND as a floating bar on the
+  // canvas whenever the Arrow tool is active. Changing it cancels an arrow that is half-drawn
+  // so one arrow never mixes both types.
+  const changeArrowMode = (mode) => {
+    if (mode === arrowMode) return;
+    if (arrowDrawing.isDrawing) {
+      setArrowDrawing({ isDrawing: false, fromId: null, points: [] });
+      setLastClickedCornerNodeId(null);
+    }
+    setArrowMode(mode);
   };
 
   return (
@@ -5615,11 +5766,37 @@ export default function MapEditor() {
                 </select>
               </div>
               <div style={styles.buttonGroup}>
+                <label style={styles.label}>Arrow Type</label>
+                <div style={styles.toolGrid}>
+                  <button
+                    onClick={() => changeArrowMode("single")}
+                    style={arrowMode === "single" ? styles.buttonSmallActive : styles.buttonSmall}
+                    title="One-way arrow (A → B)"
+                  >
+                    → Single
+                  </button>
+                  <button
+                    onClick={() => changeArrowMode("multi")}
+                    style={arrowMode === "multi" ? { ...styles.buttonSmallActive, background:'#a855f7', border:'1px solid #a855f7' } : styles.buttonSmall}
+                    title="Two-way arrow (A ↔ B)"
+                  >
+                    ↔ Multi
+                  </button>
+                </div>
+                <div style={styles.hint}>
+                  {arrowMode === "multi"
+                    ? "Multi direction: click one node, then another. A two-way arrow (arrowhead on both ends) connects them."
+                    : "Single direction: click one node, then another. A one-way arrow connects them."}
+                </div>
+              </div>
+              <div style={styles.buttonGroup}>
                 <label style={styles.label}>Arrow Direction</label>
                 <button onClick={() => setArrowDirection(p => p === "forward" ? "reverse" : "forward")}
-                  style={{ ...styles.button, background: arrowDirection === "reverse" ? "#ef4444" : "#f97316", color:"white", border:"none" }}>
+                  disabled={arrowMode === "multi"}
+                  style={{ ...styles.button, background: arrowDirection === "reverse" ? "#ef4444" : "#f97316", color:"white", border:"none", opacity: arrowMode === "multi" ? 0.4 : 1, cursor: arrowMode === "multi" ? "not-allowed" : "pointer" }}>
                   {arrowDirection === "reverse" ? "⬅️ Reverse" : "➡️ Forward"}
                 </button>
+                {arrowMode === "multi" && <div style={styles.hint}>Not used for multi-direction arrows (they go both ways).</div>}
               </div>
               <div style={styles.buttonGroup}>
                 <label style={styles.label}>Zone Settings</label>
@@ -5674,6 +5851,7 @@ export default function MapEditor() {
               <button
                 onClick={() => {
                   const nextRotation = (rotationRef.current + 90) % 360;
+                  rotationRef.current = nextRotation;
                   setRotation(nextRotation);
                   recordHistoryState({ rotation: nextRotation });
                 }}
@@ -5700,6 +5878,30 @@ export default function MapEditor() {
               />
             </div>
 
+            {/* Floating Arrow Type picker — appears when the Arrow tool is active */}
+            {tool === "connect" && (
+              <div style={styles.arrowModeBar}>
+                <div style={{ fontSize:12, fontWeight:600, color:T.text }}>Arrow type</div>
+                <button
+                  onClick={() => changeArrowMode("single")}
+                  style={arrowMode === "single" ? styles.buttonSmallActive : styles.buttonSmall}
+                  title="One-way arrow (A → B)"
+                >
+                  → Single direction
+                </button>
+                <button
+                  onClick={() => changeArrowMode("multi")}
+                  style={arrowMode === "multi" ? { ...styles.buttonSmallActive, background:'#a855f7', border:'1px solid #a855f7' } : styles.buttonSmall}
+                  title="Two-way arrow (A ↔ B)"
+                >
+                  ↔ Multi direction
+                </button>
+                <div style={{ ...styles.hint, maxWidth:170, marginTop:0 }}>
+                  {arrowDrawing.isDrawing ? "Now click the second node." : "Click a node to start."}
+                </div>
+              </div>
+            )}
+
             {showYawTooltip && (
               <div style={styles.yawTooltip}>
                 <h4 style={{ margin:'0 0 8px 0', color:T.text }}>📐 Yaw Calculation Info</h4>
@@ -5708,6 +5910,7 @@ export default function MapEditor() {
                   • Waypoints are ordered by arrow connections<br />
                   • Forward arrows → forward mission<br />
                   • Reverse arrows → reverse mission<br />
+                  • Multi-direction arrows (↔) → used in BOTH the forward and the reverse mission<br />
                   • Speed only appears in YAML if set via right-click<br />
                   • Right-click on any node to set custom speed<br />
                   • Click and drag any node in Pan/Node mode to reposition it<br />
@@ -5761,7 +5964,6 @@ export default function MapEditor() {
                     const cc = clientToCanvasCoords(t.clientX, t.clientY);
                     const node = findNodeAtCanvas(cc.x, cc.y, 10 / zoomState.scale);
                     if (node && (tool === "pan" || tool === "place_node")) {
-                      saveToHistory();
                       draggingNodeRef.current = node.id;
                       setDraggingNodeId(node.id);
                     } else {
@@ -5802,9 +6004,13 @@ export default function MapEditor() {
                       let proj = vx * px + vy * py;
                       const maxBow = Math.max(25, len * 0.6);
                       proj = Math.max(-maxBow, Math.min(maxBow, proj));
-                      setArrows(prev => prev.map(a =>
-                        a.id === arrowId ? { ...a, bends: { ...(a.bends || {}), [segmentIndex]: proj } } : a
-                      ));
+                      setArrows(prev => {
+                        const next = prev.map(a =>
+                          a.id === arrowId ? { ...a, bends: { ...(a.bends || {}), [segmentIndex]: proj } } : a
+                        );
+                        arrowsRef.current = next;
+                        return next;
+                      });
                     } else if (zoomState.isDragging) {
                       const x = t.clientX-rect.left, y = t.clientY-rect.top;
                       setZoomState(p => ({ ...p, offsetX:p.offsetX+x-p.lastX, offsetY:p.offsetY+y-p.lastY, lastX:x, lastY:y }));

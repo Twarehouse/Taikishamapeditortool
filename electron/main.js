@@ -82,6 +82,13 @@
 // }
 
 
+
+
+
+////////////////////////////////  Sending of json and yaml files is implemented in this file //////////////////////////////////////////
+////////////////////////////////  change robot username, password and path to store file (optional) //////////////////////////////////////////
+////////////////////////////////  No need seperate python files to run on robot //////////////////////////////////////////////////////
+
 const { app, BrowserWindow, Menu, dialog, ipcMain } = require("electron");
 const path = require("path");
 const { exec } = require("child_process");
@@ -89,8 +96,8 @@ const { Client } = require("ssh2"); // npm install ssh2
 
 // ── SSH / SFTP: send a file to the robot ─────────────────────────────────────
 // Fixed login used for every robot. The user only types the robot IP in the app.
-const ROBOT_USER = "sanket";
-const ROBOT_PASSWORD = "Taikisha@123";
+const ROBOT_USER = "taikisha";
+const ROBOT_PASSWORD = "12345";
 const ROBOT_PORT = 22;
 const ROBOT_REMOTE_DIR = "Desktop"; // relative to the robot's home folder, or an absolute path
 
