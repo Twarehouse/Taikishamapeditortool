@@ -35,15 +35,10 @@ Built with React, Vite and Tailwind CSS, with an optional Electron wrapper and a
 
 ### Backend (needed for "Send to Robot")
 
-The Send YAML / Send JSON buttons post to a Flask server at `http://localhost:5000`.
+The Send YAML / Send JSON buttons.
 
-```bash
-cd backend
-pip install -r requirements.txt
-python3 robot_json_send.py
-```
-
-Check the files in `backend/` (`robot_json_send.py`, `robot_yaml_send.py`) to see which one serves the endpoint you need. Everything else in the editor works without the backend.
+In the main.js update the username, password and path to save the files in robot and click on send button to send the files. Files will be stored
+at desired location.
 
 ### Desktop app (Electron)
 
